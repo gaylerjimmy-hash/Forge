@@ -36,6 +36,26 @@ RegistrationResult ModuleRegistry::register_module(const Module& module)
         };
     }
 
+    const auto conflicting_connection = std::find_if(
+        modules_.begin(),
+        modules_.end(),
+        [&module](const auto& entry) {
+            const Module& existing = entry.second;
+            return
+                existing.module_id != module.module_id &&
+                existing.status != ModuleStatus::Offline &&
+                existing.connection_id == module.connection_id;
+        }
+    );
+
+    if (conflicting_connection != modules_.end())
+    {
+        return {
+            RegistrationStatus::Rejected,
+            "Connection is already bound to another module"
+        };
+    }
+
     const auto existing_it = modules_.find(module.module_id);
 
     if (existing_it == modules_.end())
@@ -110,6 +130,7 @@ bool ModuleRegistry::mark_offline_by_connection(
         )
         {
             module.status = ModuleStatus::Offline;
+            module.connection_id.clear();
             return true;
         }
     }

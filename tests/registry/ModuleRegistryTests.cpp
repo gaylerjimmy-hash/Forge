@@ -87,6 +87,80 @@ void test_rejects_active_duplicate_session()
     );
 }
 
+
+void test_rejects_connection_claimed_by_another_module()
+{
+    ModuleRegistry registry;
+    const auto first = registry.register_module(make_module());
+
+    const auto result = registry.register_module(
+        make_module("scale-02", "AAAAAAAA", "connection-1")
+    );
+
+    const auto original = registry.find("scale-01");
+
+    expect(
+        first.status == RegistrationStatus::Added,
+        "test setup failed to add original module"
+    );
+    expect(
+        result.status == RegistrationStatus::Rejected,
+        "connection was assigned to two active modules"
+    );
+    expect(
+        original &&
+        original->connection_id == "connection-1" &&
+        original->status == ModuleStatus::Active,
+        "connection conflict changed original registration"
+    );
+    expect(
+        !registry.find("scale-02").has_value(),
+        "connection conflict inserted rejected module"
+    );
+}
+
+void test_offline_module_releases_connection()
+{
+    ModuleRegistry registry;
+    const auto first = registry.register_module(make_module());
+
+    expect(
+        first.status == RegistrationStatus::Added,
+        "test setup failed to add original module"
+    );
+    expect(
+        registry.mark_offline_by_connection("connection-1"),
+        "active connection was not marked offline"
+    );
+
+    const auto offline = registry.find("scale-01");
+
+    expect(
+        offline &&
+        offline->status == ModuleStatus::Offline &&
+        offline->connection_id.empty(),
+        "offline module retained a stale connection binding"
+    );
+    expect(
+        !registry.find_by_connection("connection-1").has_value(),
+        "released connection still resolved to offline module"
+    );
+
+    const auto result = registry.register_module(
+        make_module("scale-02", "AAAAAAAA", "connection-1")
+    );
+    const auto rebound = registry.find_by_connection("connection-1");
+
+    expect(
+        result.status == RegistrationStatus::Added,
+        "released connection could not be assigned to another module"
+    );
+    expect(
+        rebound && rebound->module_id == "scale-02",
+        "connection lookup did not resolve to new active owner"
+    );
+}
+
 void test_accepts_new_session_after_offline()
 {
     ModuleRegistry registry;
@@ -178,6 +252,8 @@ int run_module_registry_tests()
     test_adds_new_module();
     test_rebinds_same_session();
     test_rejects_active_duplicate_session();
+    test_rejects_connection_claimed_by_another_module();
+    test_offline_module_releases_connection();
     test_accepts_new_session_after_offline();
     test_quarantine_blocks_registration();
     test_rejects_incomplete_module();
