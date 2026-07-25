@@ -540,6 +540,32 @@ void test_offline_and_quarantined_capabilities_rejected() {
     expect(quarantined.publish_capabilities("connection-1",make_capabilities()).status==CapabilityPublishStatus::Quarantined,"quarantined capabilities accepted");
 }
 
+void test_publishes_typed_measurements() {
+    ModuleRegistry registry; registry.register_module(make_module());
+    auto caps=make_capabilities(); caps.items[0].unit="lb"; caps.items[0].minimum=0; caps.items[0].maximum=100;
+    registry.publish_capabilities("connection-1",caps);
+    MeasurementMessage message{"70","scale-01","81A9C5D2","weight",1,"42.5",MeasurementQuality::Good};
+    message.unit="lb";
+    expect(registry.publish_measurement("connection-1",message).status==MeasurementPublishStatus::Accepted,"valid measurement rejected");
+    auto module=registry.find("scale-01");
+    expect(module&&std::get<double>(module->measurements.at("weight").value)==42.5,"typed measurement not stored");
+    expect(registry.publish_measurement("connection-1",message).status==MeasurementPublishStatus::Duplicate,"duplicate measurement not ignored");
+    message.sequence=2;message.value_text="101";
+    expect(registry.publish_measurement("connection-1",message).error_code=="VALUE_RANGE","out-of-range measurement accepted");
+}
+
+void test_measurement_freshness_and_invalidation() {
+    const auto start=ModuleRegistry::TimePoint{};
+    ModuleRegistry registry;registry.register_module(make_module(),start);registry.publish_capabilities("connection-1",make_capabilities(),start);
+    MeasurementMessage message{"70","scale-01","81A9C5D2","weight",1,"42.5",MeasurementQuality::Good};
+    registry.publish_measurement("connection-1",message,start);
+    expect(registry.expire_measurements(std::chrono::milliseconds{5000},start+std::chrono::milliseconds{4999}).empty(),"measurement expired early");
+    expect(registry.expire_measurements(std::chrono::milliseconds{5000},start+std::chrono::milliseconds{5000}).size()==1,"measurement did not become stale");
+    registry.mark_offline_by_connection("connection-1");
+    const auto record=registry.find("scale-01")->measurements.at("weight");
+    expect(!record.operational&&record.effective_quality==MeasurementQuality::Unavailable,"offline measurement remained operational");
+}
+
 } // namespace
 
 int run_module_registry_tests()
@@ -566,6 +592,8 @@ int run_module_registry_tests()
     test_rejects_capability_identity_mismatch();
     test_capability_revision_semantics();
     test_offline_and_quarantined_capabilities_rejected();
+    test_publishes_typed_measurements();
+    test_measurement_freshness_and_invalidation();
 
     return failures;
 }

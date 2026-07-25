@@ -20,6 +20,7 @@ add_library(automation_core
     src/Frame/FrameAssembler.cpp
     src/Protocol/Message.cpp
     src/Protocol/Capability.cpp
+    src/Protocol/Measurement.cpp
     src/Protocol/Parser.cpp
     src/Protocol/Validator.cpp
     src/Registry/ModuleRegistry.cpp
@@ -64,6 +65,7 @@ if(AUTOMATION_CORE_BUILD_TESTS)
         tests/parser/ParserTests.cpp
         tests/protocol/HeartbeatMessageTests.cpp
         tests/protocol/CapabilityModelTests.cpp
+        tests/protocol/MeasurementModelTests.cpp
         tests/transport/ConsoleTransportTests.cpp
         tests/validator/ValidatorTests.cpp
         tests/serializer/MessageSerializerTests.cpp

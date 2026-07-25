@@ -95,6 +95,10 @@ std::string capabilities(
     return "CAPABILITIES\nMSG="+message_id+"\nID=scale-01\nSESSION=81A9C5D2\nREV="+std::to_string(revision)+"\nCOUNT=1\nITEM.0.NAME=weight\nITEM.0.TYPE=measurement\nITEM.0.DATA_TYPE=float\nITEM.0.ACCESS=read\nEND\n";
 }
 
+std::string measurement(const std::string& quality="good") {
+    return "MEASUREMENT\nMSG=measure-1\nID=scale-01\nSESSION=81A9C5D2\nCAP=weight\nSEQ=1\nVALUE=42.5\nQUALITY="+quality+"\nEND\n";
+}
+
 void test_no_packet_is_a_no_op() {
     FakeTransport transport;
     Core core{transport};
@@ -1039,6 +1043,20 @@ void test_capability_revision_conflict_through_core() {
     expect(transport.sent.size()==3&&transport.sent[2].payload.find("CODE=CAPABILITY_REVISION_CONFLICT\n")!=std::string::npos,"same-revision capability change accepted through Core");
 }
 
+void test_measurement_end_to_end() {
+    FakeTransport transport;std::ostringstream trace;Core core{transport,trace};
+    transport.incoming.push_back({"serial:device-1",hello()});
+    transport.incoming.push_back({"serial:device-1",capabilities()});
+    transport.incoming.push_back({"serial:device-1",measurement()});
+    core.poll_once();core.poll_once();core.poll_once();
+    expect(transport.sent.size()==2,"accepted measurement unexpectedly produced an ACK");
+    expect(trace.str().find("event=measurement_accepted")!=std::string::npos,"accepted measurement was not traced");
+
+    transport.incoming.push_back({"serial:device-1",measurement("stale")});
+    core.poll_once();
+    expect(transport.sent.size()==3&&transport.sent.back().payload.find("CODE=INVALID_VALUE")!=std::string::npos,"reserved stale wire quality was not rejected");
+}
+
 } // namespace
 
 int run_core_tests() {
@@ -1073,6 +1091,7 @@ int run_core_tests() {
     test_reboot_suspicion_is_traced();
     test_capability_lifecycle_tracing();
     test_capability_revision_conflict_through_core();
+    test_measurement_end_to_end();
 
     return failures;
 }

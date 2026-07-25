@@ -49,6 +49,21 @@ std::string MessageSerializer::serialize(
                         std::to_string(payload.active_fault_count) + "\n"
                     "END\n";
             }
+            else if constexpr (std::is_same_v<Payload, MeasurementMessage>) {
+                std::string result =
+                    "MEASUREMENT\nMSG=" + payload.message_id +
+                    "\nID=" + payload.module_id +
+                    "\nSESSION=" + payload.session_id +
+                    "\nCAP=" + payload.capability +
+                    "\nSEQ=" + std::to_string(payload.sequence) +
+                    "\nVALUE=" + payload.value_text + "\n";
+                if (payload.unit) result += "UNIT=" + *payload.unit + "\n";
+                result += "QUALITY=" + to_string(payload.quality) + "\n";
+                if (payload.uncertainty) result += "UNCERTAINTY=" + std::to_string(*payload.uncertainty) + "\n";
+                if (payload.raw) result += "RAW=" + *payload.raw + "\n";
+                if (payload.calibration_revision) result += "CAL_REV=" + std::to_string(*payload.calibration_revision) + "\n";
+                return result + "END\n";
+            }
             else if constexpr (
                 std::is_same_v<Payload, CapabilitiesMessage>
             ) {

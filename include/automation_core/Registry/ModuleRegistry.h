@@ -4,6 +4,7 @@
 #include "automation_core/Registry/HeartbeatResult.h"
 #include "automation_core/Registry/CapabilityResult.h"
 #include "automation_core/Registry/RegistrationResult.h"
+#include "automation_core/Registry/MeasurementResult.h"
 #include "automation_core/Protocol/Message.h"
 
 #include <chrono>
@@ -36,7 +37,18 @@ public:
         TimePoint now = Clock::now()
     );
 
+    MeasurementPublishResult publish_measurement(
+        const std::string& connection_id,
+        const MeasurementMessage& measurement,
+        TimePoint now = Clock::now()
+    );
+
     std::vector<std::string> expire_heartbeats(
+        std::chrono::milliseconds timeout,
+        TimePoint now = Clock::now()
+    );
+
+    std::vector<std::string> expire_measurements(
         std::chrono::milliseconds timeout,
         TimePoint now = Clock::now()
     );

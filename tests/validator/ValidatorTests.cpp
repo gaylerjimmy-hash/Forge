@@ -382,6 +382,17 @@ void test_validates_capabilities() {
     expect(validator.validate(message).valid(),"valid command capability rejected");
 }
 
+void test_validates_measurement() {
+    Validator validator;
+    MeasurementMessage value{"70","scale-01","81A9C5D2","weight",1,"42.5",MeasurementQuality::Good};
+    expect(validator.validate(Message{value}).valid(),"valid measurement rejected");
+    value.uncertainty=-0.1;
+    expect_rejected(Message{value},validator,"UNCERTAINTY","negative uncertainty");
+    value.uncertainty.reset();
+    value.quality=MeasurementQuality::Stale;
+    expect_rejected(Message{value},validator,"QUALITY","wire stale quality");
+}
+
 } // namespace
 
 int run_validator_tests() {
@@ -398,6 +409,7 @@ int run_validator_tests() {
     test_validates_message_id();
     test_validation_order_is_deterministic();
     test_validates_capabilities();
+    test_validates_measurement();
 
     return failures;
 }

@@ -26,13 +26,15 @@ RouteResult MessageRouter::route(
         std::get_if<HeartbeatMessage>(&message.payload);
     const auto* capabilities =
         std::get_if<CapabilitiesMessage>(&message.payload);
+    const auto* measurement =
+        std::get_if<MeasurementMessage>(&message.payload);
 
-    if (hello == nullptr && heartbeat == nullptr && capabilities == nullptr) {
+    if (hello == nullptr && heartbeat == nullptr && capabilities == nullptr && measurement == nullptr) {
         return {
             responses_.error(
                 "",
                 "UNSUPPORTED",
-                "Only HELLO, HEARTBEAT, and CAPABILITIES messages are supported"
+                "Unsupported message type"
             ),
             "Unsupported message type"
         };
@@ -43,7 +45,7 @@ RouteResult MessageRouter::route(
             ? hello->message_id
             : heartbeat != nullptr
                 ? heartbeat->message_id
-                : capabilities->message_id;
+                : capabilities != nullptr ? capabilities->message_id : measurement->message_id;
 
         return {
             responses_.error(
@@ -62,7 +64,7 @@ RouteResult MessageRouter::route(
             ? hello->message_id
             : heartbeat != nullptr
                 ? heartbeat->message_id
-                : capabilities->message_id;
+                : capabilities != nullptr ? capabilities->message_id : measurement->message_id;
 
         return {
             responses_.error(
@@ -122,6 +124,12 @@ RouteResult MessageRouter::route(
             ),
             result.detail
         };
+    }
+
+    if (measurement != nullptr) {
+        const auto result=registry_.publish_measurement(connection_id,*measurement,now);
+        if(result.accepted())return {std::nullopt,result.detail};
+        return {responses_.error(measurement->message_id,result.error_code,result.detail),result.detail};
     }
 
     const Module module{

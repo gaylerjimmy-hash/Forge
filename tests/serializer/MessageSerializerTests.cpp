@@ -27,6 +27,13 @@ int run_message_serializer_tests() {
     Parser parser;
 
     {
+        MeasurementMessage measurement{"70","scale01","81A9C5D2","weight",2081,"42.75",MeasurementQuality::Good};
+        measurement.unit="lb"; measurement.uncertainty=0.1; measurement.calibration_revision=3;
+        const auto parsed=parser.parse(frame(serializer.serialize(Message{measurement})));
+        expect(parsed.ok()&&parsed.message&&std::holds_alternative<MeasurementMessage>(parsed.message->payload));
+    }
+
+    {
         const Message message{CapabilitiesMessage{"50","scale01","81A9C5D2",1,{Capability{"weight",CapabilityType::Measurement,CapabilityDataType::Float,CapabilityAccess::Read,std::string{"lb"}}}}};
         const auto serialized=serializer.serialize(message);
         const auto parsed=parser.parse(frame(serialized));

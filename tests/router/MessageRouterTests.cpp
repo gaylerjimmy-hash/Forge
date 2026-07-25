@@ -447,6 +447,19 @@ void test_invalid_capability_replacement_is_atomic() {
     expect(get_error(result)&&module&&module->capability_revision==1&&module->capabilities[0].data_type==CapabilityDataType::Float,"invalid replacement changed accepted capabilities");
 }
 
+void test_routes_measurements_without_ack() {
+    Validator validator;ModuleRegistry registry;ResponseBuilder responses;MessageRouter router{validator,registry,responses};
+    static_cast<void>(router.route("connection-1",make_hello()));
+    Message caps{CapabilitiesMessage{"msg-50","scale-01","81A9C5D2",1,{Capability{"weight",CapabilityType::Measurement,CapabilityDataType::Float,CapabilityAccess::Read,std::string{"lb"}}}}};
+    static_cast<void>(router.route("connection-1",caps));
+    MeasurementMessage measurement{"70","scale-01","81A9C5D2","weight",1,"42.5",MeasurementQuality::Good};measurement.unit="lb";
+    const auto accepted=router.route("connection-1",Message{measurement});
+    expect(!accepted.response&&registry.find("scale-01")->measurements.count("weight")==1,"valid measurement was not silently accepted");
+    measurement.sequence=2;measurement.unit="kg";
+    const auto rejected=router.route("connection-1",Message{measurement});
+    expect(get_error(rejected)&&get_error(rejected)->message_id=="70"&&get_error(rejected)->code=="UNIT_MISMATCH","measurement rejection was not correlated");
+}
+
 } // namespace
 
 int run_message_router_tests() {
@@ -467,6 +480,7 @@ int run_message_router_tests() {
     test_routes_capabilities();
     test_rejects_unknown_capability_module();
     test_invalid_capability_replacement_is_atomic();
+    test_routes_measurements_without_ack();
 
     return failures;
 }

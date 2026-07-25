@@ -2,11 +2,13 @@
 
 #include "automation_core/ModuleState.h"
 #include "automation_core/Protocol/Capability.h"
+#include "automation_core/Protocol/Measurement.h"
 
 #include <chrono>
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 namespace automation_core {
 
@@ -14,6 +16,20 @@ enum class ModuleStatus {
     Active,
     Offline,
     Quarantined
+};
+
+struct MeasurementRecord {
+    MeasurementValue value;
+    std::string value_text;
+    MeasurementQuality published_quality{MeasurementQuality::Good};
+    MeasurementQuality effective_quality{MeasurementQuality::Good};
+    std::uint32_t sequence{0};
+    std::optional<std::string> unit;
+    std::optional<double> uncertainty;
+    std::optional<std::string> raw;
+    std::optional<std::uint32_t> calibration_revision;
+    std::chrono::steady_clock::time_point accepted_at{};
+    bool operational{true};
 };
 
 struct Module {
@@ -37,6 +53,7 @@ struct Module {
     std::uint32_t capability_revision{0};
     std::vector<Capability> capabilities;
     std::chrono::steady_clock::time_point capabilities_published_at{};
+    std::unordered_map<std::string, MeasurementRecord> measurements;
 };
 
 } // namespace automation_core

@@ -85,6 +85,55 @@ ParseResult parse_capabilities(const std::vector<std::string>& lines) {
     return {Message{CapabilitiesMessage{fields["MSG"],fields["ID"],fields["SESSION"],*rev,std::move(items)}},ParseError::None,{}};
 }
 
+ParseResult parse_measurement(const std::vector<std::string>& lines) {
+    const std::unordered_set<std::string> required{
+        "MSG", "ID", "SESSION", "CAP", "SEQ", "VALUE", "QUALITY"
+    };
+    const std::unordered_set<std::string> optional{
+        "UNIT", "UNCERTAINTY", "RAW", "CAL_REV"
+    };
+    std::unordered_map<std::string, std::string> fields;
+    bool ended = false;
+    for (std::size_t i = 1; i < lines.size(); ++i) {
+        const auto& line = lines[i];
+        if (line == "END") {
+            ended = true;
+            for (++i; i < lines.size(); ++i)
+                if (!lines[i].empty()) return failure(ParseError::TrailingData, "Data appears after END.");
+            break;
+        }
+        const auto pos = line.find('=');
+        if (pos == std::string::npos || pos == 0 || pos == line.size() - 1 ||
+            line.find('=', pos + 1) != std::string::npos)
+            return failure(ParseError::MalformedField, "Malformed field: " + line);
+        const auto key = line.substr(0, pos);
+        if (required.count(key) == 0 && optional.count(key) == 0)
+            return failure(ParseError::UnknownField, "Unknown field: " + key);
+        if (!fields.emplace(key, line.substr(pos + 1)).second)
+            return failure(ParseError::DuplicateField, "Duplicate field: " + key);
+    }
+    if (!ended) return failure(ParseError::MissingTerminator, "Message is missing END.");
+    for (const auto& key : required)
+        if (fields.count(key) == 0) return failure(ParseError::MissingField, "Missing required field: " + key);
+    const auto sequence = parse_unsigned_integer<std::uint32_t>(fields["SEQ"]);
+    const auto quality = parse_measurement_quality(fields["QUALITY"]);
+    if (!sequence || !quality) return failure(ParseError::InvalidValue, "MEASUREMENT contains an invalid typed value.");
+    MeasurementMessage message;
+    message.message_id=fields["MSG"]; message.module_id=fields["ID"]; message.session_id=fields["SESSION"];
+    message.capability=fields["CAP"]; message.sequence=*sequence; message.value_text=fields["VALUE"]; message.quality=*quality;
+    if (fields.count("UNIT")) message.unit=fields["UNIT"];
+    if (fields.count("RAW")) message.raw=fields["RAW"];
+    if (fields.count("UNCERTAINTY")) {
+        message.uncertainty=parse_double(fields["UNCERTAINTY"]);
+        if (!message.uncertainty) return failure(ParseError::InvalidValue, "Invalid measurement uncertainty.");
+    }
+    if (fields.count("CAL_REV")) {
+        message.calibration_revision=parse_unsigned_integer<std::uint32_t>(fields["CAL_REV"]);
+        if (!message.calibration_revision) return failure(ParseError::InvalidValue, "Invalid calibration revision.");
+    }
+    return {Message{std::move(message)}, ParseError::None, {}};
+}
+
 template <typename Integer>
 std::optional<Integer> parse_unsigned_integer(
     const std::string& value
@@ -116,6 +165,9 @@ ParseResult Parser::parse(const Frame& frame) const {
 
     if (lines.front() == "CAPABILITIES") {
         return parse_capabilities(lines);
+    }
+    if (lines.front() == "MEASUREMENT") {
+        return parse_measurement(lines);
     }
 
     const bool is_hello = lines.front() == "HELLO";

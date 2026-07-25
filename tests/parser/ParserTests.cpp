@@ -25,6 +25,17 @@ int run_parser_tests() {
     Parser parser;
 
     {
+        const auto result=parser.parse(frame("MEASUREMENT\nMSG=70\nID=scale01\nSESSION=81A9C5D2\nCAP=weight\nSEQ=2081\nVALUE=42.75\nUNIT=lb\nQUALITY=good\nUNCERTAINTY=0.1\nEND\n"));
+        const auto* measurement=result.message?std::get_if<MeasurementMessage>(&result.message->payload):nullptr;
+        expect(result.ok()&&measurement&&measurement->sequence==2081&&measurement->uncertainty);
+    }
+
+    {
+        const auto result=parser.parse(frame("MEASUREMENT\nMSG=70\nID=scale01\nSESSION=s\nCAP=weight\nSEQ=1\nVALUE=1\nQUALITY=stale\nEND\n"));
+        expect(!result.ok()); expect(result.error==ParseError::InvalidValue);
+    }
+
+    {
         const auto result=parser.parse(frame("CAPABILITIES\nMSG=50\nID=scale01\nSESSION=81A9C5D2\nREV=1\nCOUNT=1\nITEM.0.NAME=weight\nITEM.0.TYPE=measurement\nITEM.0.DATA_TYPE=float\nITEM.0.ACCESS=read\nITEM.0.UNIT=lb\nEND\n"));
         expect(result.ok());
         const auto* caps=result.message?std::get_if<CapabilitiesMessage>(&result.message->payload):nullptr;

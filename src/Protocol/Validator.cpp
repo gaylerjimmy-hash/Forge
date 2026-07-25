@@ -200,10 +200,23 @@ ValidationResult Validator::validate(const Message& message) const {
         return {ValidationStatus::Valid,"",""};
     }
 
+    const auto* measurement = std::get_if<MeasurementMessage>(&message.payload);
+    if (measurement != nullptr) {
+        if (!is_message_id(measurement->message_id)) return {ValidationStatus::Rejected,"MSG","Invalid message id"};
+        if (!is_identifier(measurement->module_id)) return {ValidationStatus::Rejected,"MODULE_ID","Invalid module id"};
+        if (!is_session_id(measurement->session_id)) return {ValidationStatus::Rejected,"SESSION","Invalid session"};
+        if (!is_identifier(measurement->capability) || measurement->capability.size()>32) return {ValidationStatus::Rejected,"CAPABILITY_NAME","Invalid capability name"};
+        if (measurement->value_text.empty()) return {ValidationStatus::Rejected,"VALUE","Measurement value is empty"};
+        if (measurement->unit && measurement->unit->size()>32) return {ValidationStatus::Rejected,"UNIT","Measurement unit is too long"};
+        if (measurement->uncertainty && (!std::isfinite(*measurement->uncertainty) || *measurement->uncertainty<0.0)) return {ValidationStatus::Rejected,"UNCERTAINTY","Uncertainty must be finite and nonnegative"};
+        if (measurement->quality==MeasurementQuality::Stale) return {ValidationStatus::Rejected,"QUALITY","stale is reserved for Forge OS"};
+        return {ValidationStatus::Valid,"",""};
+    }
+
     return {
         ValidationStatus::Rejected,
         "UNSUPPORTED",
-        "Only HELLO, HEARTBEAT, and CAPABILITIES are supported"
+        "Unsupported message type"
     };
 }
 

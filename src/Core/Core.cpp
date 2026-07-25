@@ -152,7 +152,10 @@ bool Core::poll_once() {
 
     for (const auto& module_id : expired_modules) {
         trace("module_offline", module_id + ": heartbeat timeout");
+        trace("measurement_unavailable", module_id);
     }
+    const auto stale_measurements=registry_.expire_measurements(measurement_timeout_,now);
+    for(const auto& name:stale_measurements)trace("measurement_stale",name);
 
     const auto packet = transport_.receive();
 
@@ -291,6 +294,8 @@ bool Core::poll_once() {
         std::get_if<HeartbeatMessage>(&parse_result.message->payload);
     const auto* capabilities =
         std::get_if<CapabilitiesMessage>(&parse_result.message->payload);
+    const auto* measurement =
+        std::get_if<MeasurementMessage>(&parse_result.message->payload);
 
     if (!route_result.has_response()) {
         if (heartbeat != nullptr) {
@@ -308,6 +313,10 @@ bool Core::poll_once() {
                     : "heartbeat_accepted",
                 detail
             );
+        }
+        if(measurement!=nullptr){
+            const std::string detail=measurement->module_id+"."+measurement->capability+" seq="+std::to_string(measurement->sequence);
+            trace(route_result.detail=="Duplicate measurement ignored"?"measurement_duplicate":route_result.detail=="Measurement recovered"?"measurement_recovered":"measurement_accepted",detail);
         }
 
         trace("route_completed", route_result.detail + "; no response");
@@ -364,6 +373,8 @@ bool Core::poll_once() {
             );
         }
     }
+
+    if(measurement!=nullptr&&error!=nullptr)trace("measurement_rejected",measurement->module_id+"."+measurement->capability+": "+error->code);
 
     const auto* acknowledgement =
         std::get_if<HelloAckMessage>(&route_result.response->payload);

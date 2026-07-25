@@ -59,6 +59,7 @@ private:
     std::ostream* trace_output_;
     NowFunction now_;
     std::chrono::milliseconds heartbeat_timeout_;
+    std::chrono::milliseconds measurement_timeout_{5000};
     ConnectionManager connections_;
     FrameAssembler frames_;
     Parser parser_;

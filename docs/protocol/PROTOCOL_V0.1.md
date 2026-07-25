@@ -138,6 +138,45 @@ Optional fields are `UNIT`, `MIN`, `MAX`, `QUALITY`, `CALIBRATION`, and
 Accepted documents receive `CAPABILITIES_ACK` containing correlated `MSG`,
 `ID`, `REV`, and `STATUS=accepted`. Rejected documents receive `ERROR`.
 
+## MEASUREMENT
+
+`MEASUREMENT` publishes one value against an accepted measurement capability.
+
+```text
+MEASUREMENT
+MSG=00000070
+ID=scale01
+SESSION=81A9C5D2
+CAP=weight
+SEQ=2081
+VALUE=42.75
+UNIT=lb
+QUALITY=good
+END
+```
+
+Required fields are `MSG`, `ID`, `SESSION`, `CAP`, `SEQ`, `VALUE`, and
+`QUALITY`. `UNIT` is required when the capability declares one. Optional
+fields are `UNCERTAINTY`, `RAW`, and `CAL_REV`.
+
+Published quality values are `good`, `uncertain`, `bad`, `calibrating`,
+`out_of_range`, and `unavailable`. `stale` is assigned only by Forge OS.
+Values are interpreted strictly from the accepted capability data type.
+Sequences use unsigned 32-bit serial arithmetic independently per capability.
+
+Limits:
+
+- capability name: 32 characters
+- string value: 256 characters
+- enum value: 64 characters
+- unit: 32 characters
+- default stale timeout: 5000 ms
+- uncertainty: finite and nonnegative
+- numeric values: finite and within declared capability bounds
+
+Successful measurements are not acknowledged. Rejections return correlated
+`ERROR` messages.
+
 ## Initial Rules
 
 - Maximum frame size is enforced before parsing.
