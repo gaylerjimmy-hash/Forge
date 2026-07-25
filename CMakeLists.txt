@@ -57,8 +57,10 @@ if(AUTOMATION_CORE_BUILD_TESTS)
     add_executable(automation-core-tests
         tests/test_main.cpp
         tests/connection/ConnectionManagerTests.cpp
+        tests/core/CoreTests.cpp
         tests/frame/FrameAssemblerTests.cpp
         tests/parser/ParserTests.cpp
+        tests/transport/ConsoleTransportTests.cpp
         tests/validator/ValidatorTests.cpp
         tests/serializer/MessageSerializerTests.cpp
         tests/registry/ModuleRegistryTests.cpp

@@ -11,9 +11,15 @@ static std::string norm(std::string s){
     }
     return o;
 }
-FrameResult FrameAssembler::assemble(const std::string& id,const std::string& raw) const{
+FrameResult FrameAssembler::assemble(
+    const std::string& id,
+    const std::string& raw,
+    const std::chrono::milliseconds assembly_time
+) const{
     if(id.empty()||raw.empty()) return {std::nullopt,FrameError::Empty,"empty"};
     if(raw.size()>max_) return {std::nullopt,FrameError::TooLarge,"too large"};
+    if(assembly_time >= timeout_)
+        return {std::nullopt,FrameError::TimedOut,"frame assembly timed out"};
     auto n=norm(raw);
     while(!n.empty()&&(n.back()=='\n'||n.back()==' '||n.back()=='\t')) n.pop_back();
     if(!(n=="END"||(n.size()>=4&&n.substr(n.size()-4)=="\nEND")))

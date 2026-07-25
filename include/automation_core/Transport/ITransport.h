@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <optional>
 #include <string>
 
@@ -8,6 +9,7 @@ namespace automation_core {
 struct TransportPacket {
     std::string connection_id;
     std::string payload;
+    std::chrono::milliseconds assembly_time{0};
 };
 
 class ITransport {

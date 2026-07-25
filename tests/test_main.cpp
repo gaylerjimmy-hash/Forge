@@ -5,6 +5,8 @@ int run_parser_tests();
 int run_validator_tests();
 int run_message_router_tests();
 int run_connection_manager_tests();
+int run_console_transport_tests();
+int run_core_tests();
 int run_module_registry_tests();
 int run_message_serializer_tests();
 
@@ -16,6 +18,8 @@ int main()
         + run_parser_tests()
         + run_validator_tests()
         + run_connection_manager_tests()
+        + run_console_transport_tests()
+        + run_core_tests()
         + run_module_registry_tests()
         + run_message_router_tests();
 
