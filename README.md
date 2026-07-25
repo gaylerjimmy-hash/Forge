@@ -1,4 +1,4 @@
-# Automation Core — Milestone 1 Skeleton
+# Forge OS — Milestone 1 Discovery Slice
 
 Milestone 1 proves one narrow vertical slice:
 
@@ -13,7 +13,9 @@ Transport
     -> HELLO_ACK / ERROR
 ```
 
-This repository is intentionally skeletal. The structure and interfaces exist so each component can be implemented and tested one at a time without turning `Core` into a god object.
+This repository is intentionally skeletal. Most discovery components exist and
+are unit-tested independently, but the end-to-end `Core::poll_once` path is not
+yet wired.
 
 ## Build
 
@@ -23,9 +25,10 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-## Milestone 1 Scope
+## Milestone 1 Acceptance Criteria
 
-Implemented later, one component at a time:
+Milestone 1 is accepted when the repository provides an end-to-end,
+line-oriented discovery path covering:
 
 - HELLO
 - HELLO_ACK
@@ -40,7 +43,7 @@ Implemented later, one component at a time:
 - CLI tracing
 - exhaustive failure-path tests
 
-Not included yet:
+Milestone 1 does not include:
 
 - MQTT
 - TCP
@@ -50,3 +53,8 @@ Not included yet:
 - command transactions
 - capability discovery
 - real serial I/O
+
+The broader Forge v0.1 release definition includes module contracts,
+capabilities, measurements, command lifecycle, safety, recovery, simulation,
+and HMI behavior. Milestone 1 completion does not imply Forge v0.1 release
+readiness.

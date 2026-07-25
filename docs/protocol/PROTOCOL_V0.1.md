@@ -38,9 +38,19 @@ END
 - Maximum frame size is enforced before parsing.
 - The first line identifies the message type.
 - `END` terminates the frame.
-- Unknown fields are rejected.
-- Duplicate fields are rejected.
+- Fields declared optional by the applicable schema are ignored safely by a
+  receiver that does not consume them.
 - Missing required fields are rejected.
+- Fields whose required semantics cannot be established from the applicable
+  schema and protocol version are rejected; receivers do not guess.
+- `HELLO` currently defines no optional fields, so every unrecognized `HELLO`
+  field is rejected.
+- Unknown message types are rejected explicitly as `UnknownMessageType` during
+  parsing. Unsupported typed messages are rejected by the current router with
+  the `UNSUPPORTED` error code.
+- Unsupported protocol versions are rejected with an explicit
+  `PROTO_VERSION` error unless a future message type defines negotiation.
+- Duplicate fields are rejected.
 - Protocol compatibility is validated before registration.
 - Duplicate module identities are quarantined unless proven to be the same module reconnecting.
 - Responses correlate to requests using `MSG`.
