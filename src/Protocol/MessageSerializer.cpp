@@ -50,6 +50,18 @@ std::string MessageSerializer::serialize(
                     "END\n";
             }
             else if constexpr (
+                std::is_same_v<Payload, CapabilitiesMessage>
+            ) {
+                std::string result="CAPABILITIES\nMSG="+payload.message_id+"\nID="+payload.module_id+"\nSESSION="+payload.session_id+"\nREV="+std::to_string(payload.revision)+"\nCOUNT="+std::to_string(payload.items.size())+"\n";
+                for(std::size_t i=0;i<payload.items.size();++i){const auto& c=payload.items[i];const std::string p="ITEM."+std::to_string(i)+".";result+=p+"NAME="+c.name+"\n"+p+"TYPE="+to_string(c.type)+"\n"+p+"ACCESS="+to_string(c.access)+"\n";if(c.data_type)result+=p+"DATA_TYPE="+std::string(to_string(*c.data_type))+"\n";if(c.unit)result+=p+"UNIT="+*c.unit+"\n";if(c.minimum)result+=p+"MIN="+std::to_string(*c.minimum)+"\n";if(c.maximum)result+=p+"MAX="+std::to_string(*c.maximum)+"\n";if(c.supports_quality)result+=p+"QUALITY=true\n";if(c.supports_calibration)result+=p+"CALIBRATION=true\n";if(c.description)result+=p+"DESCRIPTION="+*c.description+"\n";}
+                return result+"END\n";
+            }
+            else if constexpr (
+                std::is_same_v<Payload, CapabilitiesAckMessage>
+            ) {
+                return "CAPABILITIES_ACK\nMSG="+payload.message_id+"\nID="+payload.module_id+"\nREV="+std::to_string(payload.revision)+"\nSTATUS="+payload.status+"\nEND\n";
+            }
+            else if constexpr (
                 std::is_same_v<Payload, ErrorMessage>
             ) {
                 return

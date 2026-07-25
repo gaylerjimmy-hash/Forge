@@ -1,10 +1,12 @@
 #pragma once
 
 #include "automation_core/ModuleState.h"
+#include "automation_core/Protocol/Capability.h"
 
 #include <chrono>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace automation_core {
 
@@ -30,6 +32,11 @@ struct Module {
     std::chrono::steady_clock::time_point last_heartbeat_at{};
     std::chrono::steady_clock::time_point last_transition_at{};
     std::string last_transition_reason{"registered"};
+    bool has_capabilities{false};
+    bool capabilities_available{false};
+    std::uint32_t capability_revision{0};
+    std::vector<Capability> capabilities;
+    std::chrono::steady_clock::time_point capabilities_published_at{};
 };
 
 } // namespace automation_core

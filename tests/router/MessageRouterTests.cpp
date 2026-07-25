@@ -412,6 +412,41 @@ void test_rejects_stale_and_regressed_heartbeat() {
     );
 }
 
+void test_routes_capabilities() {
+    Validator validator;
+    ModuleRegistry registry;
+    ResponseBuilder responses;
+    MessageRouter router{validator, registry, responses};
+    static_cast<void>(router.route("connection-1", make_hello()));
+    Message document{CapabilitiesMessage{"msg-50","scale-01","81A9C5D2",1,{Capability{"weight",CapabilityType::Measurement,CapabilityDataType::Float,CapabilityAccess::Read}}}};
+    const auto result=router.route("connection-1",document);
+    const auto* ack=result.response?std::get_if<CapabilitiesAckMessage>(&result.response->payload):nullptr;
+    expect(ack&&ack->revision==1,"valid capabilities did not produce ACK");
+    const auto module=registry.find("scale-01");
+    expect(module&&module->capabilities_available,"routed capabilities not stored");
+}
+
+void test_rejects_unknown_capability_module() {
+    Validator validator;
+    ModuleRegistry registry;
+    ResponseBuilder responses;
+    MessageRouter router{validator, registry, responses};
+    Message document{CapabilitiesMessage{"msg-50","missing","81A9C5D2",1,{Capability{"weight",CapabilityType::Measurement,CapabilityDataType::Float,CapabilityAccess::Read}}}};
+    const auto result=router.route("connection-1",document);
+    expect(get_error(result)&&get_error(result)->code=="UNKNOWN_MODULE","unknown capability module accepted");
+}
+
+void test_invalid_capability_replacement_is_atomic() {
+    Validator validator;ModuleRegistry registry;ResponseBuilder responses;MessageRouter router{validator,registry,responses};
+    static_cast<void>(router.route("connection-1",make_hello()));
+    Message valid{CapabilitiesMessage{"msg-50","scale-01","81A9C5D2",1,{Capability{"weight",CapabilityType::Measurement,CapabilityDataType::Float,CapabilityAccess::Read}}}};
+    static_cast<void>(router.route("connection-1",valid));
+    Message invalid{CapabilitiesMessage{"msg-51","scale-01","81A9C5D2",2,{Capability{"weight",CapabilityType::Measurement,std::nullopt,CapabilityAccess::Read}}}};
+    const auto result=router.route("connection-1",invalid);
+    const auto module=registry.find("scale-01");
+    expect(get_error(result)&&module&&module->capability_revision==1&&module->capabilities[0].data_type==CapabilityDataType::Float,"invalid replacement changed accepted capabilities");
+}
+
 } // namespace
 
 int run_message_router_tests() {
@@ -429,6 +464,9 @@ int run_message_router_tests() {
     test_rejects_unknown_heartbeat_module();
     test_rejects_heartbeat_identity_mismatch();
     test_rejects_stale_and_regressed_heartbeat();
+    test_routes_capabilities();
+    test_rejects_unknown_capability_module();
+    test_invalid_capability_replacement_is_atomic();
 
     return failures;
 }

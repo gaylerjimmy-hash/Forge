@@ -2,6 +2,7 @@
 
 #include "automation_core/Registry/Module.h"
 #include "automation_core/Registry/HeartbeatResult.h"
+#include "automation_core/Registry/CapabilityResult.h"
 #include "automation_core/Registry/RegistrationResult.h"
 #include "automation_core/Protocol/Message.h"
 
@@ -26,6 +27,12 @@ public:
     HeartbeatResult update_heartbeat(
         const std::string& connection_id,
         const HeartbeatMessage& heartbeat,
+        TimePoint now = Clock::now()
+    );
+
+    CapabilityPublishResult publish_capabilities(
+        const std::string& connection_id,
+        const CapabilitiesMessage& document,
         TimePoint now = Clock::now()
     );
 

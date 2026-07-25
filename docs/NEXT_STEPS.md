@@ -42,6 +42,22 @@ Implemented and covered by component and Core-level tests:
 - CLI heartbeat and health lifecycle tracing
 - Milestone 1 regression coverage
 
-Real serial I/O, capabilities, measurements, commands, process execution,
-persistence, GUI work, and ESP32 integration remain outside Milestones 1 and
-2.
+## Milestone 3 — Capability Discovery
+
+Implemented and covered by protocol, registry, router, and Core tests:
+
+- Indexed line-oriented `CAPABILITIES` and `CAPABILITIES_ACK`
+- Bounded capability documents and metadata
+- Typed capability, data-type, and access models
+- Strict structural and semantic validation
+- Authoritative connection and session enforcement
+- Atomic higher-revision replacement
+- Idempotent identical retry
+- Stale and same-revision conflict rejection
+- Invalid replacement rollback
+- Offline, quarantine, and new-session invalidation
+- CLI lifecycle tracing and capability summaries
+
+Real serial I/O, measurements, command execution, process execution,
+persistence, GUI work, and ESP32 integration remain outside Milestones 1
+through 3.

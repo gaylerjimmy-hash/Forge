@@ -88,6 +88,13 @@ std::string heartbeat(
         "END\n";
 }
 
+std::string capabilities(
+    const std::string& message_id="cap-1",
+    const std::uint32_t revision=1
+) {
+    return "CAPABILITIES\nMSG="+message_id+"\nID=scale-01\nSESSION=81A9C5D2\nREV="+std::to_string(revision)+"\nCOUNT=1\nITEM.0.NAME=weight\nITEM.0.TYPE=measurement\nITEM.0.DATA_TYPE=float\nITEM.0.ACCESS=read\nEND\n";
+}
+
 void test_no_packet_is_a_no_op() {
     FakeTransport transport;
     Core core{transport};
@@ -283,7 +290,7 @@ void expect_core_error(
 void test_remaining_frame_failures() {
     expect_core_error("", "FRAME_EMPTY", "empty frame");
     expect_core_error(
-        std::string(1025, 'X'),
+        std::string(16385, 'X'),
         "FRAME_TOO_LARGE",
         "oversized frame"
     );
@@ -1008,6 +1015,30 @@ void test_reboot_suspicion_is_traced() {
     );
 }
 
+void test_capability_lifecycle_tracing() {
+    FakeTransport transport;std::ostringstream trace;Core core{transport,trace};
+    transport.incoming.push_back({"serial:device-1",hello()});
+    transport.incoming.push_back({"serial:device-1",capabilities()});
+    transport.incoming.push_back({"serial:device-1",capabilities("cap-2")});
+    core.poll_once();core.poll_once();core.poll_once();
+    const auto output=trace.str();
+    expect(output.find("event=capabilities_accepted")!=std::string::npos,"accepted capabilities not traced");
+    expect(output.find("event=capabilities_idempotent")!=std::string::npos,"idempotent capabilities not traced");
+    expect(output.find("revision=1 count=1 names=weight")!=std::string::npos,"capability summary missing");
+}
+
+void test_capability_revision_conflict_through_core() {
+    FakeTransport transport;Core core{transport};
+    transport.incoming.push_back({"serial:device-1",hello()});
+    transport.incoming.push_back({"serial:device-1",capabilities()});
+    std::string changed=capabilities("cap-2");
+    const auto position=changed.find("NAME=weight");
+    changed.replace(position,std::string("NAME=weight").size(),"NAME=mass");
+    transport.incoming.push_back({"serial:device-1",changed});
+    core.poll_once();core.poll_once();core.poll_once();
+    expect(transport.sent.size()==3&&transport.sent[2].payload.find("CODE=CAPABILITY_REVISION_CONFLICT\n")!=std::string::npos,"same-revision capability change accepted through Core");
+}
+
 } // namespace
 
 int run_core_tests() {
@@ -1040,6 +1071,8 @@ int run_core_tests() {
     test_uptime_regression_and_quarantine_through_core();
     test_health_lifecycle_tracing();
     test_reboot_suspicion_is_traced();
+    test_capability_lifecycle_tracing();
+    test_capability_revision_conflict_through_core();
 
     return failures;
 }

@@ -25,6 +25,23 @@ int run_parser_tests() {
     Parser parser;
 
     {
+        const auto result=parser.parse(frame("CAPABILITIES\nMSG=50\nID=scale01\nSESSION=81A9C5D2\nREV=1\nCOUNT=1\nITEM.0.NAME=weight\nITEM.0.TYPE=measurement\nITEM.0.DATA_TYPE=float\nITEM.0.ACCESS=read\nITEM.0.UNIT=lb\nEND\n"));
+        expect(result.ok());
+        const auto* caps=result.message?std::get_if<CapabilitiesMessage>(&result.message->payload):nullptr;
+        expect(caps&&caps->items.size()==1&&caps->items[0].name=="weight");
+    }
+
+    {
+        const auto result=parser.parse(frame("CAPABILITIES\nMSG=50\nID=scale01\nSESSION=81A9C5D2\nREV=1\nCOUNT=2\nITEM.0.NAME=weight\nITEM.0.TYPE=measurement\nITEM.0.DATA_TYPE=float\nITEM.0.ACCESS=read\nEND\n"));
+        expect(!result.ok());expect(result.error==ParseError::MissingField);
+    }
+
+    {
+        const auto result=parser.parse(frame("CAPABILITIES\nMSG=50\nID=scale01\nSESSION=81A9C5D2\nREV=1\nCOUNT=1\nITEM.0.NAME=weight\nITEM.0.TYPE=measurement\nITEM.0.DATA_TYPE=float\nITEM.0.ACCESS=read\nITEM.1.NAME=extra\nEND\n"));
+        expect(!result.ok());expect(result.error==ParseError::UnknownField);
+    }
+
+    {
         const auto result = parser.parse(frame(
             "HELLO\n"
             "MSG=00000001\n"

@@ -491,6 +491,55 @@ void test_multiple_modules_expire_independently()
     );
 }
 
+CapabilitiesMessage make_capabilities(std::uint32_t revision=1) {
+    return {"msg-50","scale-01","81A9C5D2",revision,{Capability{"weight",CapabilityType::Measurement,CapabilityDataType::Float,CapabilityAccess::Read}}};
+}
+
+void test_stores_and_invalidates_capabilities() {
+    const auto start=ModuleRegistry::TimePoint{};
+    ModuleRegistry registry;
+    registry.register_module(make_module(),start);
+    const auto result=registry.publish_capabilities("connection-1",make_capabilities(),start);
+    auto module=registry.find("scale-01");
+    expect(result.accepted()&&module&&module->capabilities_available&&module->capabilities.size()==1,"capabilities not stored");
+
+    registry.mark_offline_by_connection("connection-1");
+    module=registry.find("scale-01");
+    expect(module&&module->has_capabilities&&!module->capabilities_available&&module->capabilities.size()==1,"offline capability diagnostics not retained");
+
+    registry.register_module(make_module("scale-01","AAAAAAAA","connection-2"),start);
+    module=registry.find("scale-01");
+    expect(module&&!module->has_capabilities&&module->capabilities.empty(),"new session retained stale capabilities");
+}
+
+void test_rejects_capability_identity_mismatch() {
+    ModuleRegistry registry;registry.register_module(make_module());
+    auto doc=make_capabilities();
+    expect(registry.publish_capabilities("connection-2",doc).status==CapabilityPublishStatus::ConnectionMismatch,"wrong capability connection accepted");
+    doc.session_id="AAAAAAAA";
+    expect(registry.publish_capabilities("connection-1",doc).status==CapabilityPublishStatus::SessionMismatch,"wrong capability session accepted");
+}
+
+void test_capability_revision_semantics() {
+    ModuleRegistry registry;registry.register_module(make_module());
+    const auto first=registry.publish_capabilities("connection-1",make_capabilities(2));
+    const auto repeat=registry.publish_capabilities("connection-1",make_capabilities(2));
+    auto changed=make_capabilities(2);changed.items[0].name="mass";
+    const auto conflict=registry.publish_capabilities("connection-1",changed);
+    const auto stale=registry.publish_capabilities("connection-1",make_capabilities(1));
+    const auto replacement=registry.publish_capabilities("connection-1",make_capabilities(3));
+    expect(first.status==CapabilityPublishStatus::Accepted&&repeat.status==CapabilityPublishStatus::Idempotent,"capability retry not idempotent");
+    expect(conflict.status==CapabilityPublishStatus::RevisionConflict&&stale.status==CapabilityPublishStatus::StaleRevision,"capability revision violation accepted");
+    expect(replacement.status==CapabilityPublishStatus::Accepted&&registry.find("scale-01")->capability_revision==3,"higher capability revision not accepted");
+}
+
+void test_offline_and_quarantined_capabilities_rejected() {
+    ModuleRegistry offline;offline.register_module(make_module());offline.mark_offline_by_connection("connection-1");
+    expect(offline.publish_capabilities("connection-1",make_capabilities()).status==CapabilityPublishStatus::Offline,"offline capabilities accepted");
+    ModuleRegistry quarantined;quarantined.register_module(make_module());quarantined.quarantine("scale-01");
+    expect(quarantined.publish_capabilities("connection-1",make_capabilities()).status==CapabilityPublishStatus::Quarantined,"quarantined capabilities accepted");
+}
+
 } // namespace
 
 int run_module_registry_tests()
@@ -513,6 +562,10 @@ int run_module_registry_tests()
     test_expires_heartbeat_and_registration();
     test_duplicate_does_not_refresh_health();
     test_multiple_modules_expire_independently();
+    test_stores_and_invalidates_capabilities();
+    test_rejects_capability_identity_mismatch();
+    test_capability_revision_semantics();
+    test_offline_and_quarantined_capabilities_rejected();
 
     return failures;
 }

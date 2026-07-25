@@ -24,13 +24,15 @@ RouteResult MessageRouter::route(
     const auto* hello = std::get_if<HelloMessage>(&message.payload);
     const auto* heartbeat =
         std::get_if<HeartbeatMessage>(&message.payload);
+    const auto* capabilities =
+        std::get_if<CapabilitiesMessage>(&message.payload);
 
-    if (hello == nullptr && heartbeat == nullptr) {
+    if (hello == nullptr && heartbeat == nullptr && capabilities == nullptr) {
         return {
             responses_.error(
                 "",
                 "UNSUPPORTED",
-                "Only HELLO and HEARTBEAT messages are supported"
+                "Only HELLO, HEARTBEAT, and CAPABILITIES messages are supported"
             ),
             "Unsupported message type"
         };
@@ -39,7 +41,9 @@ RouteResult MessageRouter::route(
     if (connection_id.empty()) {
         const std::string message_id = hello != nullptr
             ? hello->message_id
-            : heartbeat->message_id;
+            : heartbeat != nullptr
+                ? heartbeat->message_id
+                : capabilities->message_id;
 
         return {
             responses_.error(
@@ -56,7 +60,9 @@ RouteResult MessageRouter::route(
     if (!validation.valid()) {
         const std::string message_id = hello != nullptr
             ? hello->message_id
-            : heartbeat->message_id;
+            : heartbeat != nullptr
+                ? heartbeat->message_id
+                : capabilities->message_id;
 
         return {
             responses_.error(
@@ -82,6 +88,35 @@ RouteResult MessageRouter::route(
         return {
             responses_.error(
                 heartbeat->message_id,
+                result.error_code,
+                result.detail
+            ),
+            result.detail
+        };
+    }
+
+    if (capabilities != nullptr) {
+        const CapabilityPublishResult result =
+            registry_.publish_capabilities(
+                connection_id,
+                *capabilities,
+                now
+            );
+
+        if (result.accepted()) {
+            return {
+                responses_.capabilities_ack(
+                    capabilities->message_id,
+                    capabilities->module_id,
+                    capabilities->revision
+                ),
+                result.detail
+            };
+        }
+
+        return {
+            responses_.error(
+                capabilities->message_id,
                 result.error_code,
                 result.detail
             ),

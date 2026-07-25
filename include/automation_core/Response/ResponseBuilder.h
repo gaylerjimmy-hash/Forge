@@ -18,6 +18,12 @@ public:
         const std::string& code,
         const std::string& detail
     ) const;
+
+    [[nodiscard]] Message capabilities_ack(
+        const std::string& message_id,
+        const std::string& module_id,
+        std::uint32_t revision
+    ) const;
 };
 
 } // namespace automation_core

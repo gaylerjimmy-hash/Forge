@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <unordered_set>
 #include <utility>
 
 namespace automation_core {
@@ -172,10 +174,36 @@ ValidationResult Validator::validate(const Message& message) const {
         };
     }
 
+    const auto* capabilities =
+        std::get_if<CapabilitiesMessage>(&message.payload);
+
+    if (capabilities != nullptr) {
+        if (!is_session_id(capabilities->session_id)) return {ValidationStatus::Rejected,"SESSION","Invalid session"};
+        if (!is_identifier(capabilities->module_id)) return {ValidationStatus::Rejected,"MODULE_ID","Invalid module id"};
+        if (!is_message_id(capabilities->message_id)) return {ValidationStatus::Rejected,"MSG","Invalid message id"};
+        if (capabilities->items.empty() || capabilities->items.size() > 64) return {ValidationStatus::Rejected,"CAPABILITY_COUNT","Capability count must be between 1 and 64"};
+        std::unordered_set<std::string> names;
+        for (const auto& item : capabilities->items) {
+            if (!is_identifier(item.name) || item.name.size() > 32) return {ValidationStatus::Rejected,"CAPABILITY_NAME","Invalid capability name"};
+            if (!names.insert(item.name).second) return {ValidationStatus::Rejected,"DUPLICATE_CAPABILITY","Capability names must be unique"};
+            if (item.type == CapabilityType::Command) {
+                if (item.access != CapabilityAccess::Command) return {ValidationStatus::Rejected,"CAPABILITY_ACCESS","Command capability requires command access"};
+            } else {
+                if (!item.data_type) return {ValidationStatus::Rejected,"CAPABILITY_DATA_TYPE","Measurement and configuration require data type"};
+                if (item.access == CapabilityAccess::Command) return {ValidationStatus::Rejected,"CAPABILITY_ACCESS","Non-command capability cannot use command access"};
+            }
+            if (item.minimum.has_value() != item.maximum.has_value()) return {ValidationStatus::Rejected,"CAPABILITY_RANGE","MIN and MAX must appear together"};
+            if (item.minimum && (!std::isfinite(*item.minimum) || !std::isfinite(*item.maximum) || *item.minimum > *item.maximum)) return {ValidationStatus::Rejected,"CAPABILITY_RANGE","Invalid capability range"};
+            if (item.unit && item.unit->size() > 32) return {ValidationStatus::Rejected,"CAPABILITY_UNIT","Capability unit is too long"};
+            if (item.description && item.description->size() > 256) return {ValidationStatus::Rejected,"CAPABILITY_DESCRIPTION","Capability description is too long"};
+        }
+        return {ValidationStatus::Valid,"",""};
+    }
+
     return {
         ValidationStatus::Rejected,
         "UNSUPPORTED",
-        "Only HELLO and HEARTBEAT are supported"
+        "Only HELLO, HEARTBEAT, and CAPABILITIES are supported"
     };
 }
 

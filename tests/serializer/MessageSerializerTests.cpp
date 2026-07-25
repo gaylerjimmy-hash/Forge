@@ -27,6 +27,14 @@ int run_message_serializer_tests() {
     Parser parser;
 
     {
+        const Message message{CapabilitiesMessage{"50","scale01","81A9C5D2",1,{Capability{"weight",CapabilityType::Measurement,CapabilityDataType::Float,CapabilityAccess::Read,std::string{"lb"}}}}};
+        const auto serialized=serializer.serialize(message);
+        const auto parsed=parser.parse(frame(serialized));
+        expect(parsed.ok());
+        expect(parsed.message&&std::holds_alternative<CapabilitiesMessage>(parsed.message->payload));
+    }
+
+    {
         const Message message{
             HeartbeatMessage{
                 "00000042",

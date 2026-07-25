@@ -1,4 +1,4 @@
-# Forge OS — Milestone 2 Module Presence and Health
+# Forge OS — Milestone 3 Capability Discovery
 
 Milestone 1 proves one narrow vertical slice:
 
@@ -25,6 +25,10 @@ Milestone 2 extends that discovery slice with typed `HEARTBEAT` messages,
 authoritative registry health, deterministic sequence and uptime validation,
 monotonic offline timeouts, rediscovery requirements, and health lifecycle
 tracing.
+
+Milestone 3 adds atomic, revisioned capability discovery so modules can
+self-describe measurements, commands, and configuration without module-type
+branches in Forge OS.
 
 ## Build
 

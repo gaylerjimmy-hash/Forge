@@ -3,6 +3,7 @@
 #include "automation_core/ModuleState.h"
 
 #include <charconv>
+#include <cstdlib>
 #include <cstdint>
 #include <sstream>
 #include <string>
@@ -36,6 +37,57 @@ ParseResult failure(ParseError error, std::string detail) {
 template <typename Integer>
 std::optional<Integer> parse_unsigned_integer(
     const std::string& value
+);
+
+std::optional<double> parse_double(const std::string& value) {
+    char* end = nullptr;
+    const double parsed = std::strtod(value.c_str(), &end);
+    if (end != value.c_str() + value.size()) return std::nullopt;
+    return parsed;
+}
+
+ParseResult parse_capabilities(const std::vector<std::string>& lines) {
+    std::unordered_map<std::string,std::string> fields;
+    bool ended=false;
+    for(std::size_t i=1;i<lines.size();++i){
+        const auto& line=lines[i];
+        if(line=="END"){ended=true;for(std::size_t j=i+1;j<lines.size();++j)if(!lines[j].empty())return failure(ParseError::TrailingData,"Data appears after END.");break;}
+        const auto pos=line.find('=');
+        if(pos==std::string::npos||pos==0||pos==line.size()-1||line.find('=',pos+1)!=std::string::npos)return failure(ParseError::MalformedField,"Malformed field: "+line);
+        if(!fields.emplace(line.substr(0,pos),line.substr(pos+1)).second)return failure(ParseError::DuplicateField,"Duplicate field: "+line.substr(0,pos));
+    }
+    if(!ended)return failure(ParseError::MissingTerminator,"Message is missing END.");
+    for(const auto* key:{"MSG","ID","SESSION","REV","COUNT"})if(fields.find(key)==fields.end())return failure(ParseError::MissingField,"Missing required field: "+std::string(key));
+    const auto rev=parse_unsigned_integer<std::uint32_t>(fields["REV"]);
+    const auto count=parse_unsigned_integer<std::uint32_t>(fields["COUNT"]);
+    if(!rev||!count||*count>64)return failure(ParseError::InvalidValue,"Invalid capability revision or count.");
+    std::unordered_set<std::string> used{"MSG","ID","SESSION","REV","COUNT"};
+    std::vector<Capability> items;
+    for(std::uint32_t i=0;i<*count;++i){
+        const std::string p="ITEM."+std::to_string(i)+".";
+        for(const auto* suffix:{"NAME","TYPE","ACCESS"})if(fields.find(p+suffix)==fields.end())return failure(ParseError::MissingField,"Missing required field: "+p+suffix);
+        auto type=parse_capability_type(fields[p+"TYPE"]);
+        auto access=parse_capability_access(fields[p+"ACCESS"]);
+        if(!type||!access)return failure(ParseError::InvalidValue,"Invalid capability type or access.");
+        Capability item;item.name=fields[p+"NAME"];item.type=*type;item.access=*access;
+        used.insert(p+"NAME");used.insert(p+"TYPE");used.insert(p+"ACCESS");
+        auto take=[&](const char* suffix)->std::optional<std::string>{auto k=p+suffix;auto it=fields.find(k);if(it==fields.end())return std::nullopt;used.insert(k);return it->second;};
+        if(auto v=take("DATA_TYPE")){item.data_type=parse_capability_data_type(*v);if(!item.data_type)return failure(ParseError::InvalidValue,"Invalid capability data type.");}
+        if(auto v=take("UNIT"))item.unit=*v;
+        if(auto v=take("MIN")){item.minimum=parse_double(*v);if(!item.minimum)return failure(ParseError::InvalidValue,"Invalid capability minimum.");}
+        if(auto v=take("MAX")){item.maximum=parse_double(*v);if(!item.maximum)return failure(ParseError::InvalidValue,"Invalid capability maximum.");}
+        if(auto v=take("QUALITY")){if(*v!="true"&&*v!="false")return failure(ParseError::InvalidValue,"Invalid QUALITY.");item.supports_quality=*v=="true";}
+        if(auto v=take("CALIBRATION")){if(*v!="true"&&*v!="false")return failure(ParseError::InvalidValue,"Invalid CALIBRATION.");item.supports_calibration=*v=="true";}
+        if(auto v=take("DESCRIPTION"))item.description=*v;
+        items.push_back(std::move(item));
+    }
+    for(const auto& field:fields)if(used.find(field.first)==used.end())return failure(ParseError::UnknownField,"Unknown field: "+field.first);
+    return {Message{CapabilitiesMessage{fields["MSG"],fields["ID"],fields["SESSION"],*rev,std::move(items)}},ParseError::None,{}};
+}
+
+template <typename Integer>
+std::optional<Integer> parse_unsigned_integer(
+    const std::string& value
 ) {
     Integer parsed{};
     const char* const begin = value.data();
@@ -60,6 +112,10 @@ ParseResult Parser::parse(const Frame& frame) const {
 
     if (lines.empty() || lines.front().empty()) {
         return failure(ParseError::EmptyFrame, "Message type is missing.");
+    }
+
+    if (lines.front() == "CAPABILITIES") {
+        return parse_capabilities(lines);
     }
 
     const bool is_hello = lines.front() == "HELLO";

@@ -120,6 +120,41 @@ HeartbeatResult ModuleRegistry::update_heartbeat(
     };
 }
 
+bool capability_matches(const Capability& a,const Capability& b){
+ return a.name==b.name&&a.type==b.type&&a.data_type==b.data_type&&a.access==b.access&&a.unit==b.unit&&a.minimum==b.minimum&&a.maximum==b.maximum&&a.supports_quality==b.supports_quality&&a.supports_calibration==b.supports_calibration&&a.description==b.description;
+}
+bool capabilities_match(const std::vector<Capability>& a,const std::vector<Capability>& b){
+ if(a.size()!=b.size())return false;for(std::size_t i=0;i<a.size();++i)if(!capability_matches(a[i],b[i]))return false;return true;
+}
+
+CapabilityPublishResult ModuleRegistry::publish_capabilities(
+    const std::string& connection_id,
+    const CapabilitiesMessage& document,
+    const TimePoint now
+) {
+    const auto it=modules_.find(document.module_id);
+    if(it==modules_.end())return {CapabilityPublishStatus::UnknownModule,"UNKNOWN_MODULE","Capability module is not registered"};
+    Module& module=it->second;
+    if(module.status==ModuleStatus::Quarantined)return {CapabilityPublishStatus::Quarantined,"QUARANTINED","Module identity is quarantined"};
+    if(module.status==ModuleStatus::Offline)return {CapabilityPublishStatus::Offline,"MODULE_OFFLINE","Offline module must rediscover"};
+    if(module.connection_id!=connection_id)return {CapabilityPublishStatus::ConnectionMismatch,"CONNECTION_MISMATCH","Capabilities arrived on a non-authoritative connection"};
+    if(module.session_id!=document.session_id)return {CapabilityPublishStatus::SessionMismatch,"SESSION_MISMATCH","Capability session does not match registration"};
+    if(module.has_capabilities){
+        if(document.revision<module.capability_revision)return {CapabilityPublishStatus::StaleRevision,"CAPABILITY_REVISION","Capability revision is stale"};
+        if(document.revision==module.capability_revision){
+            if(capabilities_match(module.capabilities,document.items))return {CapabilityPublishStatus::Idempotent,"","Identical capabilities already accepted"};
+            return {CapabilityPublishStatus::RevisionConflict,"CAPABILITY_REVISION_CONFLICT","Capability content changed without revision"};
+        }
+    }
+    module.has_capabilities=true;
+    module.capabilities_available=true;
+    module.capability_revision=document.revision;
+    module.capabilities=document.items;
+    module.capabilities_published_at=now;
+    module.last_transition_reason="capabilities accepted";
+    return {CapabilityPublishStatus::Accepted,"","Capabilities accepted"};
+}
+
 RegistrationResult ModuleRegistry::register_module(
     const Module& module,
     const TimePoint now
@@ -258,6 +293,7 @@ std::vector<std::string> ModuleRegistry::expire_heartbeats(
 
         module.status = ModuleStatus::Offline;
         module.connection_id.clear();
+        module.capabilities_available = false;
         module.last_transition_at = now;
         module.last_transition_reason = "heartbeat timeout";
         expired.push_back(module.module_id);
@@ -282,6 +318,7 @@ bool ModuleRegistry::mark_offline_by_connection(
         {
             module.status = ModuleStatus::Offline;
             module.connection_id.clear();
+            module.capabilities_available = false;
             return true;
         }
     }
@@ -299,6 +336,7 @@ bool ModuleRegistry::quarantine(const std::string& module_id)
     }
 
     it->second.status = ModuleStatus::Quarantined;
+    it->second.capabilities_available = false;
     return true;
 }
 

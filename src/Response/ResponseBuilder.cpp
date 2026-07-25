@@ -31,7 +31,22 @@ Message ResponseBuilder::error(
     };
 }
 
+Message ResponseBuilder::capabilities_ack(
+    const std::string& message_id,
+    const std::string& module_id,
+    const std::uint32_t revision
+) const
+{
+    return Message{
+        CapabilitiesAckMessage{
+            message_id,
+            module_id,
+            revision,
+            "accepted"
+        }
+    };
+}
+
 
 } // namespace automation_core
-
 

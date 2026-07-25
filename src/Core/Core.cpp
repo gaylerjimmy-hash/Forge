@@ -289,6 +289,8 @@ bool Core::poll_once() {
 
     const auto* heartbeat =
         std::get_if<HeartbeatMessage>(&parse_result.message->payload);
+    const auto* capabilities =
+        std::get_if<CapabilitiesMessage>(&parse_result.message->payload);
 
     if (!route_result.has_response()) {
         if (heartbeat != nullptr) {
@@ -331,6 +333,36 @@ bool Core::poll_once() {
                 : "heartbeat_rejected",
             heartbeat->module_id + ": " + error->code
         );
+    }
+
+    if (capabilities != nullptr) {
+        if (error != nullptr) {
+            trace(
+                "capabilities_rejected",
+                capabilities->module_id + ": " + error->code
+            );
+        } else {
+            std::string detail =
+                capabilities->module_id +
+                " revision=" +
+                std::to_string(capabilities->revision) +
+                " count=" +
+                std::to_string(capabilities->items.size()) +
+                " names=";
+
+            for (std::size_t i=0;i<capabilities->items.size();++i) {
+                if (i != 0) detail += ',';
+                detail += capabilities->items[i].name;
+            }
+
+            trace(
+                route_result.detail ==
+                    "Identical capabilities already accepted"
+                    ? "capabilities_idempotent"
+                    : "capabilities_accepted",
+                detail
+            );
+        }
     }
 
     const auto* acknowledgement =

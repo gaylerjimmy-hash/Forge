@@ -359,6 +359,29 @@ void test_validation_order_is_deterministic() {
     );
 }
 
+void test_validates_capabilities() {
+    const Validator validator{"1"};
+    const Capability valid{"weight",CapabilityType::Measurement,CapabilityDataType::Float,CapabilityAccess::Read,std::string{"lb"},0.0,100.0,true,true};
+    Message message{CapabilitiesMessage{"msg-50","scale-01","81A9C5D2",1,{valid}}};
+    expect(validator.validate(message).valid(),"valid capabilities rejected");
+
+    auto duplicate=std::get<CapabilitiesMessage>(message.payload);
+    duplicate.items.push_back(valid);
+    expect_rejected(Message{duplicate},validator,"DUPLICATE_CAPABILITY","duplicate capability");
+
+    auto missing_type=std::get<CapabilitiesMessage>(message.payload);
+    missing_type.items[0].data_type.reset();
+    expect_rejected(Message{missing_type},validator,"CAPABILITY_DATA_TYPE","missing data type");
+
+    auto bad_range=std::get<CapabilitiesMessage>(message.payload);
+    bad_range.items[0].minimum=101.0;
+    expect_rejected(Message{bad_range},validator,"CAPABILITY_RANGE","invalid range");
+
+    Capability command{"tare",CapabilityType::Command,std::nullopt,CapabilityAccess::Command};
+    message=Message{CapabilitiesMessage{"msg-51","scale-01","81A9C5D2",2,{command}}};
+    expect(validator.validate(message).valid(),"valid command capability rejected");
+}
+
 } // namespace
 
 int run_validator_tests() {
@@ -374,6 +397,7 @@ int run_validator_tests() {
     test_validates_firmware_version();
     test_validates_message_id();
     test_validation_order_is_deterministic();
+    test_validates_capabilities();
 
     return failures;
 }

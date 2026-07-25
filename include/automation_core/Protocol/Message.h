@@ -1,6 +1,7 @@
 #pragma once
 
 #include "automation_core/ModuleState.h"
+#include "automation_core/Protocol/Capability.h"
 
 #include <cstdint>
 #include <string>
@@ -43,6 +44,8 @@ using MessagePayload = std::variant<
     HelloMessage,
     HelloAckMessage,
     HeartbeatMessage,
+    CapabilitiesMessage,
+    CapabilitiesAckMessage,
     ErrorMessage
 >;
 

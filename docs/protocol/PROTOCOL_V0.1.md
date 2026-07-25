@@ -91,6 +91,53 @@ Heartbeat rules:
   3000 ms. Timeout evaluation uses Forge OS monotonic time and runs even when
   no transport packet arrives.
 
+## CAPABILITIES
+
+`CAPABILITIES` atomically publishes the complete self-description for an
+already registered module.
+
+```text
+CAPABILITIES
+MSG=00000050
+ID=scale01
+SESSION=81A9C5D2
+REV=1
+COUNT=2
+ITEM.0.NAME=weight
+ITEM.0.TYPE=measurement
+ITEM.0.DATA_TYPE=float
+ITEM.0.ACCESS=read
+ITEM.0.UNIT=lb
+ITEM.0.QUALITY=true
+ITEM.0.CALIBRATION=true
+ITEM.1.NAME=tare
+ITEM.1.TYPE=command
+ITEM.1.ACCESS=command
+END
+```
+
+Limits:
+
+- 64 capabilities per module
+- 32 characters per capability name
+- 16 command arguments
+- 32 enum values
+- 256 characters per description
+- 16384 bytes per capability frame
+
+Indexes are zero-based, contiguous, and must match `COUNT`. Names are unique.
+Supported types are `measurement`, `command`, and `configuration`. Supported
+data types are `bool`, `int`, `uint`, `float`, `string`, and `enum`. Access
+values are `read`, `write`, `read_write`, and `command`.
+
+`DATA_TYPE` is required for measurement and configuration capabilities.
+Optional fields are `UNIT`, `MIN`, `MAX`, `QUALITY`, `CALIBRATION`, and
+`DESCRIPTION`. `MIN` and `MAX` must appear together and `MIN` must not exceed
+`MAX`.
+
+Accepted documents receive `CAPABILITIES_ACK` containing correlated `MSG`,
+`ID`, `REV`, and `STATUS=accepted`. Rejected documents receive `ERROR`.
+
 ## Initial Rules
 
 - Maximum frame size is enforced before parsing.
