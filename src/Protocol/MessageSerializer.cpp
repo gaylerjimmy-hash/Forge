@@ -35,6 +35,21 @@ std::string MessageSerializer::serialize(
                     "END\n";
             }
             else if constexpr (
+                std::is_same_v<Payload, HeartbeatMessage>
+            ) {
+                return
+                    "HEARTBEAT\n"
+                    "MSG=" + payload.message_id + "\n"
+                    "ID=" + payload.module_id + "\n"
+                    "SESSION=" + payload.session_id + "\n"
+                    "SEQ=" + std::to_string(payload.sequence) + "\n"
+                    "UPTIME_MS=" + std::to_string(payload.uptime_ms) + "\n"
+                    "STATE=" + to_string(payload.state) + "\n"
+                    "FAULTS=" +
+                        std::to_string(payload.active_fault_count) + "\n"
+                    "END\n";
+            }
+            else if constexpr (
                 std::is_same_v<Payload, ErrorMessage>
             ) {
                 return
@@ -43,6 +58,9 @@ std::string MessageSerializer::serialize(
                     "CODE=" + payload.code + "\n"
                     "DETAIL=" + payload.detail + "\n"
                     "END\n";
+            }
+            else {
+                return std::string{};
             }
         },
         message.payload

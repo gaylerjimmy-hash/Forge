@@ -38,6 +38,25 @@ Message make_hello(
     };
 }
 
+Message make_heartbeat(
+    std::uint32_t sequence = 1,
+    std::uint64_t uptime_ms = 1000,
+    std::string module_id = "scale-01",
+    std::string session_id = "81A9C5D2"
+) {
+    return Message{
+        HeartbeatMessage{
+            "heartbeat-1",
+            std::move(module_id),
+            std::move(session_id),
+            sequence,
+            uptime_ms,
+            ModuleState::Ready,
+            0
+        }
+    };
+}
+
 const HelloAckMessage* get_ack(const RouteResult& result) {
     if (!result.response) {
         return nullptr;
@@ -295,6 +314,104 @@ void test_rejects_unsupported_message() {
     );
 }
 
+void test_routes_valid_heartbeat_without_ack() {
+    Validator validator;
+    ModuleRegistry registry;
+    ResponseBuilder responses;
+    MessageRouter router{validator, registry, responses};
+    static_cast<void>(router.route("connection-1", make_hello()));
+
+    const RouteResult result =
+        router.route("connection-1", make_heartbeat());
+    const auto module = registry.find("scale-01");
+
+    expect(
+        !result.has_response(),
+        "valid heartbeat produced an acknowledgment"
+    );
+    expect(
+        module &&
+        module->has_heartbeat &&
+        module->last_heartbeat_sequence == 1,
+        "valid heartbeat did not update registry"
+    );
+}
+
+void test_rejects_unknown_heartbeat_module() {
+    Validator validator;
+    ModuleRegistry registry;
+    ResponseBuilder responses;
+    MessageRouter router{validator, registry, responses};
+
+    const RouteResult result = router.route(
+        "connection-1",
+        make_heartbeat(1, 1000, "missing")
+    );
+    const auto* error = get_error(result);
+
+    expect(
+        error && error->code == "UNKNOWN_MODULE",
+        "unknown heartbeat module was not rejected"
+    );
+    expect(
+        error && error->message_id == "heartbeat-1",
+        "heartbeat error lost correlation ID"
+    );
+}
+
+void test_rejects_heartbeat_identity_mismatch() {
+    Validator validator;
+    ModuleRegistry registry;
+    ResponseBuilder responses;
+    MessageRouter router{validator, registry, responses};
+    static_cast<void>(router.route("connection-1", make_hello()));
+
+    const auto wrong_connection =
+        router.route("connection-2", make_heartbeat());
+    const auto wrong_session = router.route(
+        "connection-1",
+        make_heartbeat(1, 1000, "scale-01", "AAAAAAAA")
+    );
+
+    expect(
+        get_error(wrong_connection) &&
+        get_error(wrong_connection)->code == "CONNECTION_MISMATCH",
+        "wrong heartbeat connection was not rejected"
+    );
+    expect(
+        get_error(wrong_session) &&
+        get_error(wrong_session)->code == "SESSION_MISMATCH",
+        "wrong heartbeat session was not rejected"
+    );
+}
+
+void test_rejects_stale_and_regressed_heartbeat() {
+    Validator validator;
+    ModuleRegistry registry;
+    ResponseBuilder responses;
+    MessageRouter router{validator, registry, responses};
+    static_cast<void>(router.route("connection-1", make_hello()));
+    static_cast<void>(
+        router.route("connection-1", make_heartbeat(10, 1000))
+    );
+
+    const auto stale =
+        router.route("connection-1", make_heartbeat(9, 1100));
+    const auto regressed =
+        router.route("connection-1", make_heartbeat(11, 999));
+
+    expect(
+        get_error(stale) &&
+        get_error(stale)->code == "HEARTBEAT_ORDER",
+        "stale heartbeat was not rejected"
+    );
+    expect(
+        get_error(regressed) &&
+        get_error(regressed)->code == "UPTIME_REGRESSION",
+        "uptime regression was not rejected"
+    );
+}
+
 } // namespace
 
 int run_message_router_tests() {
@@ -308,6 +425,10 @@ int run_message_router_tests() {
     test_duplicate_after_reconnect();
     test_rejects_quarantined_identity();
     test_rejects_unsupported_message();
+    test_routes_valid_heartbeat_without_ack();
+    test_rejects_unknown_heartbeat_module();
+    test_rejects_heartbeat_identity_mismatch();
+    test_rejects_stale_and_regressed_heartbeat();
 
     return failures;
 }

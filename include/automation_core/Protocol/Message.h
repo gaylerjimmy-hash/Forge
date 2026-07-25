@@ -1,5 +1,8 @@
 #pragma once
 
+#include "automation_core/ModuleState.h"
+
+#include <cstdint>
 #include <string>
 #include <variant>
 
@@ -20,6 +23,16 @@ struct HelloAckMessage {
     std::string status;
 };
 
+struct HeartbeatMessage {
+    std::string message_id;
+    std::string module_id;
+    std::string session_id;
+    std::uint32_t sequence{0};
+    std::uint64_t uptime_ms{0};
+    ModuleState state{ModuleState::Booting};
+    std::uint32_t active_fault_count{0};
+};
+
 struct ErrorMessage {
     std::string message_id;
     std::string code;
@@ -29,6 +42,7 @@ struct ErrorMessage {
 using MessagePayload = std::variant<
     HelloMessage,
     HelloAckMessage,
+    HeartbeatMessage,
     ErrorMessage
 >;
 

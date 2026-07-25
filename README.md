@@ -1,4 +1,4 @@
-# Forge OS — Milestone 1 Discovery Slice
+# Forge OS — Milestone 2 Module Presence and Health
 
 Milestone 1 proves one narrow vertical slice:
 
@@ -17,7 +17,14 @@ This repository is intentionally skeletal. The discovery components are wired
 through `Core::poll_once`, and `ConsoleTransport` can read line-oriented frames
 from standard input and write responses to standard output. The CLI writes
 discovery lifecycle traces to standard error so standard output remains a
-machine-readable protocol channel.
+machine-readable protocol channel. It processes frames until standard input
+reaches EOF and traces heartbeat health transitions without acknowledging
+successful heartbeats on the wire.
+
+Milestone 2 extends that discovery slice with typed `HEARTBEAT` messages,
+authoritative registry health, deterministic sequence and uptime validation,
+monotonic offline timeouts, rediscovery requirements, and health lifecycle
+tracing.
 
 ## Build
 

@@ -20,7 +20,9 @@ public:
 
     [[nodiscard]] RouteResult route(
         const std::string& connection_id,
-        const Message& message
+        const Message& message,
+        ModuleRegistry::TimePoint now =
+            ModuleRegistry::Clock::now()
     );
 
 private:

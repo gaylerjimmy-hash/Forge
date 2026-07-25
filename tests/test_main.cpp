@@ -1,6 +1,7 @@
 #include <iostream>
 
 int run_frame_tests();
+int run_heartbeat_message_tests();
 int run_parser_tests();
 int run_validator_tests();
 int run_message_router_tests();
@@ -15,6 +16,7 @@ int main()
     const int failures =
 	    + run_message_serializer_tests()
         + run_frame_tests()
+        + run_heartbeat_message_tests()
         + run_parser_tests()
         + run_validator_tests()
         + run_connection_manager_tests()

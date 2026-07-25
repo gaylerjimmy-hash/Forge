@@ -5,6 +5,7 @@
 
 #include <ostream>
 #include <string>
+#include <utility>
 #include <variant>
 
 namespace automation_core {
@@ -43,6 +44,8 @@ std::string parse_error_code(const ParseError error) {
             return "MISSING_FIELD";
         case ParseError::EmptyValue:
             return "EMPTY_VALUE";
+        case ParseError::InvalidValue:
+            return "INVALID_VALUE";
         case ParseError::MissingTerminator:
             return "MISSING_TERMINATOR";
         case ParseError::TrailingData:
@@ -57,14 +60,64 @@ std::string parse_error_code(const ParseError error) {
 } // namespace
 
 Core::Core(ITransport& transport)
-    : Core(transport, nullptr) {}
+    : Core(
+        transport,
+        nullptr,
+        [] { return Clock::now(); },
+        std::chrono::milliseconds{3000}
+    ) {}
 
 Core::Core(ITransport& transport, std::ostream& trace_output)
-    : Core(transport, &trace_output) {}
+    : Core(
+        transport,
+        &trace_output,
+        [] { return Clock::now(); },
+        std::chrono::milliseconds{3000}
+    ) {}
 
-Core::Core(ITransport& transport, std::ostream* trace_output)
+Core::Core(ITransport& transport, NowFunction now)
+    : Core(
+        transport,
+        nullptr,
+        std::move(now),
+        std::chrono::milliseconds{3000}
+    ) {}
+
+Core::Core(
+    ITransport& transport,
+    NowFunction now,
+    const std::chrono::milliseconds heartbeat_timeout
+)
+    : Core(
+        transport,
+        nullptr,
+        std::move(now),
+        heartbeat_timeout
+    ) {}
+
+Core::Core(
+    ITransport& transport,
+    std::ostream& trace_output,
+    NowFunction now,
+    const std::chrono::milliseconds heartbeat_timeout
+)
+    : Core(
+        transport,
+        &trace_output,
+        std::move(now),
+        heartbeat_timeout
+    ) {}
+
+Core::Core(
+    ITransport& transport,
+    std::ostream* trace_output,
+    NowFunction now,
+    const std::chrono::milliseconds heartbeat_timeout
+)
     : transport_(transport),
       trace_output_(trace_output),
+      now_(std::move(now)),
+      heartbeat_timeout_(heartbeat_timeout),
       connections_(),
       frames_(),
       parser_(),
@@ -92,17 +145,25 @@ void Core::trace(
     *trace_output_ << '\n';
 }
 
-void Core::poll_once() {
+bool Core::poll_once() {
+    const TimePoint now = now_();
+    const auto expired_modules =
+        registry_.expire_heartbeats(heartbeat_timeout_, now);
+
+    for (const auto& module_id : expired_modules) {
+        trace("module_offline", module_id + ": heartbeat timeout");
+    }
+
     const auto packet = transport_.receive();
 
     if (!packet) {
         trace("poll_idle", "transport returned no packet");
-        return;
+        return false;
     }
 
     if (packet->connection_id.empty()) {
         trace("packet_rejected", "transport connection ID is empty");
-        return;
+        return true;
     }
 
     auto connection = transport_connections_.find(packet->connection_id);
@@ -144,7 +205,7 @@ void Core::poll_once() {
                 sent ? "response_sent" : "response_send_failed",
                 packet->connection_id
             );
-            return;
+            return true;
         }
 
         if (connections_.touch(connection->second)) {
@@ -190,7 +251,7 @@ void Core::poll_once() {
             packet->connection_id,
             serializer_.serialize(error)
         ));
-        return;
+        return true;
     }
 
     trace("frame_accepted", connection_id);
@@ -214,17 +275,41 @@ void Core::poll_once() {
             packet->connection_id,
             serializer_.serialize(error)
         ));
-        return;
+        return true;
     }
 
     trace("parse_accepted", connection_id);
 
     const RouteResult route_result =
-        router_.route(connection_id, *parse_result.message);
+        router_.route(
+            connection_id,
+            *parse_result.message,
+            now
+        );
+
+    const auto* heartbeat =
+        std::get_if<HeartbeatMessage>(&parse_result.message->payload);
 
     if (!route_result.has_response()) {
+        if (heartbeat != nullptr) {
+            const std::string detail =
+                heartbeat->module_id +
+                " state=" + to_string(heartbeat->state) +
+                " seq=" + std::to_string(heartbeat->sequence) +
+                " uptime_ms=" + std::to_string(heartbeat->uptime_ms) +
+                " faults=" +
+                    std::to_string(heartbeat->active_fault_count);
+
+            trace(
+                route_result.detail == "Duplicate heartbeat ignored"
+                    ? "heartbeat_duplicate"
+                    : "heartbeat_accepted",
+                detail
+            );
+        }
+
         trace("route_completed", route_result.detail + "; no response");
-        return;
+        return true;
     }
 
     trace("route_completed", route_result.detail);
@@ -238,6 +323,27 @@ void Core::poll_once() {
         static_cast<void>(connections_.quarantine(connection_id));
     }
 
+    if (error != nullptr && heartbeat != nullptr) {
+        trace(
+            error->code == "SESSION_MISMATCH" ||
+                error->code == "UPTIME_REGRESSION"
+                ? "module_reboot_suspected"
+                : "heartbeat_rejected",
+            heartbeat->module_id + ": " + error->code
+        );
+    }
+
+    const auto* acknowledgement =
+        std::get_if<HelloAckMessage>(&route_result.response->payload);
+
+    if (acknowledgement != nullptr) {
+        if (route_result.detail == "Offline module registered on a new connection") {
+            trace("module_recovered", acknowledgement->connection_id);
+        } else if (route_result.detail == "Existing session rebound to connection") {
+            trace("module_reconnected", acknowledgement->connection_id);
+        }
+    }
+
     const bool sent = transport_.send(
         packet->connection_id,
         serializer_.serialize(*route_result.response)
@@ -247,6 +353,8 @@ void Core::poll_once() {
         sent ? "response_sent" : "response_send_failed",
         packet->connection_id
     );
+
+    return true;
 }
 
 } // namespace automation_core

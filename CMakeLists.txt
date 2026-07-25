@@ -15,6 +15,7 @@ option(AUTOMATION_CORE_BUILD_TESTS "Build Automation Core tests" ON)
 option(AUTOMATION_CORE_BUILD_EXAMPLES "Build Automation Core examples" ON)
 
 add_library(automation_core
+    src/ModuleState.cpp
     src/Connection/ConnectionManager.cpp
     src/Frame/FrameAssembler.cpp
     src/Protocol/Message.cpp
@@ -60,6 +61,7 @@ if(AUTOMATION_CORE_BUILD_TESTS)
         tests/core/CoreTests.cpp
         tests/frame/FrameAssemblerTests.cpp
         tests/parser/ParserTests.cpp
+        tests/protocol/HeartbeatMessageTests.cpp
         tests/transport/ConsoleTransportTests.cpp
         tests/validator/ValidatorTests.cpp
         tests/serializer/MessageSerializerTests.cpp

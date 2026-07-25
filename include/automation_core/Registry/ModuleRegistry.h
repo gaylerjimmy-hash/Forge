@@ -1,8 +1,11 @@
 #pragma once
 
 #include "automation_core/Registry/Module.h"
+#include "automation_core/Registry/HeartbeatResult.h"
 #include "automation_core/Registry/RegistrationResult.h"
+#include "automation_core/Protocol/Message.h"
 
+#include <chrono>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -12,7 +15,24 @@ namespace automation_core {
 
 class ModuleRegistry {
 public:
-    RegistrationResult register_module(const Module& module);
+    using Clock = std::chrono::steady_clock;
+    using TimePoint = Clock::time_point;
+
+    RegistrationResult register_module(
+        const Module& module,
+        TimePoint now = Clock::now()
+    );
+
+    HeartbeatResult update_heartbeat(
+        const std::string& connection_id,
+        const HeartbeatMessage& heartbeat,
+        TimePoint now = Clock::now()
+    );
+
+    std::vector<std::string> expire_heartbeats(
+        std::chrono::milliseconds timeout,
+        TimePoint now = Clock::now()
+    );
 
     bool mark_offline_by_connection(const std::string& connection_id);
     bool quarantine(const std::string& module_id);

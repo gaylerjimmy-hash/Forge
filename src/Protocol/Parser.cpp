@@ -1,6 +1,9 @@
 #include "automation_core/Protocol/Parser.h"
 
-#include <array>
+#include "automation_core/ModuleState.h"
+
+#include <charconv>
+#include <cstdint>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -30,6 +33,22 @@ ParseResult failure(ParseError error, std::string detail) {
     return {std::nullopt, error, std::move(detail)};
 }
 
+template <typename Integer>
+std::optional<Integer> parse_unsigned_integer(
+    const std::string& value
+) {
+    Integer parsed{};
+    const char* const begin = value.data();
+    const char* const end = begin + value.size();
+    const auto result = std::from_chars(begin, end, parsed);
+
+    if (result.ec != std::errc{} || result.ptr != end) {
+        return std::nullopt;
+    }
+
+    return parsed;
+}
+
 } // namespace
 
 ParseResult Parser::parse(const Frame& frame) const {
@@ -43,16 +62,24 @@ ParseResult Parser::parse(const Frame& frame) const {
         return failure(ParseError::EmptyFrame, "Message type is missing.");
     }
 
-    if (lines.front() != "HELLO") {
+    const bool is_hello = lines.front() == "HELLO";
+    const bool is_heartbeat = lines.front() == "HEARTBEAT";
+
+    if (!is_hello && !is_heartbeat) {
         return failure(
             ParseError::UnknownMessageType,
             "Unsupported message type: " + lines.front()
         );
     }
 
-    const std::array<std::string, 6> required_fields{
-        "MSG", "TYPE", "ID", "FW", "PROTO", "SESSION"
-    };
+    const std::vector<std::string> required_fields = is_hello
+        ? std::vector<std::string>{
+            "MSG", "TYPE", "ID", "FW", "PROTO", "SESSION"
+        }
+        : std::vector<std::string>{
+            "MSG", "ID", "SESSION", "SEQ",
+            "UPTIME_MS", "STATE", "FAULTS"
+        };
 
     const std::unordered_set<std::string> allowed_fields{
         required_fields.begin(), required_fields.end()
@@ -141,17 +168,50 @@ ParseResult Parser::parse(const Frame& frame) const {
         }
     }
 
-    HelloMessage hello{
+    if (is_hello) {
+        HelloMessage hello{
+            fields.at("MSG"),
+            fields.at("TYPE"),
+            fields.at("ID"),
+            fields.at("FW"),
+            fields.at("PROTO"),
+            fields.at("SESSION")
+        };
+
+        return {
+            Message{std::move(hello)},
+            ParseError::None,
+            {}
+        };
+    }
+
+    const auto sequence =
+        parse_unsigned_integer<std::uint32_t>(fields.at("SEQ"));
+    const auto uptime =
+        parse_unsigned_integer<std::uint64_t>(fields.at("UPTIME_MS"));
+    const auto fault_count =
+        parse_unsigned_integer<std::uint32_t>(fields.at("FAULTS"));
+    const auto state = parse_module_state(fields.at("STATE"));
+
+    if (!sequence || !uptime || !fault_count || !state) {
+        return failure(
+            ParseError::InvalidValue,
+            "HEARTBEAT contains an invalid typed value."
+        );
+    }
+
+    HeartbeatMessage heartbeat{
         fields.at("MSG"),
-        fields.at("TYPE"),
         fields.at("ID"),
-        fields.at("FW"),
-        fields.at("PROTO"),
-        fields.at("SESSION")
+        fields.at("SESSION"),
+        *sequence,
+        *uptime,
+        *state,
+        *fault_count
     };
 
     return {
-        Message{std::move(hello)},
+        Message{std::move(heartbeat)},
         ParseError::None,
         {}
     };

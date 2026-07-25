@@ -1,6 +1,7 @@
 #include "automation_core/Registry/ModuleRegistry.h"
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace automation_core {
 namespace {
@@ -26,7 +27,103 @@ bool metadata_matches(const Module& left, const Module& right)
 
 } // namespace
 
-RegistrationResult ModuleRegistry::register_module(const Module& module)
+HeartbeatResult ModuleRegistry::update_heartbeat(
+    const std::string& connection_id,
+    const HeartbeatMessage& heartbeat,
+    const TimePoint now
+) {
+    const auto iterator = modules_.find(heartbeat.module_id);
+
+    if (iterator == modules_.end()) {
+        return {
+            HeartbeatStatus::UnknownModule,
+            "UNKNOWN_MODULE",
+            "Heartbeat module is not registered"
+        };
+    }
+
+    Module& module = iterator->second;
+
+    if (module.status == ModuleStatus::Quarantined) {
+        return {
+            HeartbeatStatus::Quarantined,
+            "QUARANTINED",
+            "Module identity is quarantined"
+        };
+    }
+
+    if (module.status == ModuleStatus::Offline) {
+        return {
+            HeartbeatStatus::Offline,
+            "MODULE_OFFLINE",
+            "Offline module must rediscover before heartbeat"
+        };
+    }
+
+    if (module.connection_id != connection_id) {
+        return {
+            HeartbeatStatus::ConnectionMismatch,
+            "CONNECTION_MISMATCH",
+            "Heartbeat arrived on a non-authoritative connection"
+        };
+    }
+
+    if (module.session_id != heartbeat.session_id) {
+        return {
+            HeartbeatStatus::SessionMismatch,
+            "SESSION_MISMATCH",
+            "Heartbeat session does not match registration"
+        };
+    }
+
+    if (module.has_heartbeat) {
+        const std::uint32_t distance =
+            heartbeat.sequence - module.last_heartbeat_sequence;
+
+        if (distance == 0) {
+            return {
+                HeartbeatStatus::Duplicate,
+                "",
+                "Duplicate heartbeat ignored"
+            };
+        }
+
+        if (distance >= 0x80000000U) {
+            return {
+                HeartbeatStatus::OutOfOrder,
+                "HEARTBEAT_ORDER",
+                "Heartbeat sequence is stale or out of order"
+            };
+        }
+
+        if (heartbeat.uptime_ms < module.uptime_ms) {
+            return {
+                HeartbeatStatus::UptimeRegression,
+                "UPTIME_REGRESSION",
+                "Heartbeat uptime decreased within the active session"
+            };
+        }
+    }
+
+    module.state = heartbeat.state;
+    module.has_heartbeat = true;
+    module.last_heartbeat_sequence = heartbeat.sequence;
+    module.uptime_ms = heartbeat.uptime_ms;
+    module.active_fault_count = heartbeat.active_fault_count;
+    module.last_heartbeat_at = now;
+    module.last_transition_reason = "heartbeat accepted";
+
+    return {
+        HeartbeatStatus::Accepted,
+        "",
+        "Heartbeat accepted"
+    };
+}
+
+RegistrationResult ModuleRegistry::register_module(
+    const Module& module,
+    const TimePoint now
+)
 {
     if (!has_required_fields(module))
     {
@@ -62,6 +159,8 @@ RegistrationResult ModuleRegistry::register_module(const Module& module)
     {
         Module registered = module;
         registered.status = ModuleStatus::Active;
+        registered.last_transition_at = now;
+        registered.last_transition_reason = "module registered";
         modules_.emplace(registered.module_id, std::move(registered));
 
         return {
@@ -100,6 +199,13 @@ RegistrationResult ModuleRegistry::register_module(const Module& module)
 
         existing.connection_id = module.connection_id;
         existing.status = ModuleStatus::Active;
+        existing.last_transition_at = now;
+        existing.last_transition_reason = "session rebound to connection";
+
+        if (existing.has_heartbeat)
+        {
+            existing.last_heartbeat_at = now;
+        }
 
         return {
             RegistrationStatus::Reconnected,
@@ -109,11 +215,56 @@ RegistrationResult ModuleRegistry::register_module(const Module& module)
 
     existing = module;
     existing.status = ModuleStatus::Active;
+    existing.last_transition_at = now;
+    existing.last_transition_reason = "offline module rediscovered";
 
     return {
         RegistrationStatus::Reconnected,
         "Offline module registered on a new connection"
     };
+}
+
+std::vector<std::string> ModuleRegistry::expire_heartbeats(
+    const std::chrono::milliseconds timeout,
+    const TimePoint now
+)
+{
+    if (timeout.count() <= 0)
+    {
+        throw std::invalid_argument(
+            "heartbeat timeout must be positive"
+        );
+    }
+
+    std::vector<std::string> expired;
+
+    for (auto& entry : modules_)
+    {
+        Module& module = entry.second;
+
+        if (module.status != ModuleStatus::Active)
+        {
+            continue;
+        }
+
+        const TimePoint freshness = module.has_heartbeat
+            ? module.last_heartbeat_at
+            : module.last_transition_at;
+
+        if (now - freshness < timeout)
+        {
+            continue;
+        }
+
+        module.status = ModuleStatus::Offline;
+        module.connection_id.clear();
+        module.last_transition_at = now;
+        module.last_transition_reason = "heartbeat timeout";
+        expired.push_back(module.module_id);
+    }
+
+    std::sort(expired.begin(), expired.end());
+    return expired;
 }
 
 bool ModuleRegistry::mark_offline_by_connection(

@@ -33,6 +33,64 @@ DETAIL=scale01 already registered
 END
 ```
 
+## HEARTBEAT
+
+`HEARTBEAT` reports the health of a module that has already completed
+discovery. It never registers or rebinds a module implicitly.
+
+```text
+HEARTBEAT
+MSG=00000042
+ID=scale01
+SESSION=81A9C5D2
+SEQ=1042
+UPTIME_MS=381500
+STATE=ready
+FAULTS=0
+END
+```
+
+Required fields:
+
+- `MSG`: request correlation identifier
+- `ID`: registered module identity
+- `SESSION`: active session established by `HELLO`
+- `SEQ`: unsigned 32-bit heartbeat sequence
+- `UPTIME_MS`: unsigned 64-bit module uptime in milliseconds
+- `STATE`: normalized module state
+- `FAULTS`: unsigned 32-bit active fault count
+
+Allowed states:
+
+- `booting`
+- `initializing`
+- `ready`
+- `busy`
+- `degraded`
+- `faulted`
+- `updating`
+
+`offline` is assigned by Forge OS and is not accepted as a module-reported
+state.
+
+Heartbeat rules:
+
+- The module, session, and authoritative connection must match the registry.
+- Successful heartbeats do not receive an ACK.
+- Rejected heartbeats receive an explicit correlated `ERROR`.
+- Duplicate sequence numbers are ignored safely.
+- Sequence ordering uses unsigned 32-bit serial arithmetic. An incoming
+  sequence is newer when `(incoming - previous) mod 2^32` is between `1` and
+  `2^31 - 1`. Other non-equal values are stale or out of order.
+- Sequence rollover from `4294967295` to `0` is valid.
+- Uptime must not decrease within a session. Regression indicates a probable
+  reboot and requires rediscovery.
+- A changed session requires a new `HELLO`; it is not accepted through
+  `HEARTBEAT`.
+- The default expected interval is 1000 ms and the default offline timeout is
+  3000 ms. Timeout evaluation uses Forge OS monotonic time and runs even when
+  no transport packet arrives.
+
 ## Initial Rules
 
 - Maximum frame size is enforced before parsing.

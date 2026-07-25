@@ -10,6 +10,8 @@
 #include "automation_core/Router/MessageRouter.h"
 #include "automation_core/Transport/ITransport.h"
 
+#include <chrono>
+#include <functional>
 #include <iosfwd>
 #include <string>
 #include <unordered_map>
@@ -18,13 +20,35 @@ namespace automation_core {
 
 class Core {
 public:
+    using Clock = std::chrono::steady_clock;
+    using TimePoint = Clock::time_point;
+    using NowFunction = std::function<TimePoint()>;
+
     explicit Core(ITransport& transport);
     Core(ITransport& transport, std::ostream& trace_output);
+    Core(ITransport& transport, NowFunction now);
+    Core(
+        ITransport& transport,
+        NowFunction now,
+        std::chrono::milliseconds heartbeat_timeout
+    );
+    Core(
+        ITransport& transport,
+        std::ostream& trace_output,
+        NowFunction now,
+        std::chrono::milliseconds heartbeat_timeout =
+            std::chrono::milliseconds{3000}
+    );
 
-    void poll_once();
+    bool poll_once();
 
 private:
-    Core(ITransport& transport, std::ostream* trace_output);
+    Core(
+        ITransport& transport,
+        std::ostream* trace_output,
+        NowFunction now,
+        std::chrono::milliseconds heartbeat_timeout
+    );
 
     void trace(
         const std::string& event,
@@ -33,6 +57,8 @@ private:
 
     ITransport& transport_;
     std::ostream* trace_output_;
+    NowFunction now_;
+    std::chrono::milliseconds heartbeat_timeout_;
     ConnectionManager connections_;
     FrameAssembler frames_;
     Parser parser_;

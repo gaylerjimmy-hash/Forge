@@ -81,66 +81,101 @@ Validator::Validator(std::string supported_protocol_version)
 ValidationResult Validator::validate(const Message& message) const {
     const auto* hello = std::get_if<HelloMessage>(&message.payload);
 
-    if (hello == nullptr) {
+    if (hello != nullptr) {
+        if (hello->protocol_version != supported_protocol_version_) {
+            return {
+                ValidationStatus::VersionMismatch,
+                "PROTO_VERSION",
+                "Unsupported protocol"
+            };
+        }
+
+        if (!is_session_id(hello->session_id)) {
+            return {
+                ValidationStatus::Rejected,
+                "SESSION",
+                "Invalid session"
+            };
+        }
+
+        if (!is_identifier(hello->module_type)) {
+            return {
+                ValidationStatus::Rejected,
+                "MODULE_TYPE",
+                "Invalid module type"
+            };
+        }
+
+        if (!is_identifier(hello->module_id)) {
+            return {
+                ValidationStatus::Rejected,
+                "MODULE_ID",
+                "Invalid module id"
+            };
+        }
+
+        if (!is_firmware_version(hello->firmware_version)) {
+            return {
+                ValidationStatus::Rejected,
+                "FW",
+                "Invalid firmware"
+            };
+        }
+
+        if (!is_message_id(hello->message_id)) {
+            return {
+                ValidationStatus::Rejected,
+                "MSG",
+                "Invalid message id"
+            };
+        }
+
         return {
-            ValidationStatus::Rejected,
-            "UNSUPPORTED",
-            "Only HELLO supported"
+            ValidationStatus::Valid,
+            "",
+            ""
         };
     }
 
-    if (hello->protocol_version != supported_protocol_version_) {
-        return {
-            ValidationStatus::VersionMismatch,
-            "PROTO_VERSION",
-            "Unsupported protocol"
-        };
-    }
+    const auto* heartbeat =
+        std::get_if<HeartbeatMessage>(&message.payload);
 
-    if (!is_session_id(hello->session_id)) {
-        return {
-            ValidationStatus::Rejected,
-            "SESSION",
-            "Invalid session"
-        };
-    }
+    if (heartbeat != nullptr) {
+        if (!is_session_id(heartbeat->session_id)) {
+            return {
+                ValidationStatus::Rejected,
+                "SESSION",
+                "Invalid session"
+            };
+        }
 
-    if (!is_identifier(hello->module_type)) {
-        return {
-            ValidationStatus::Rejected,
-            "MODULE_TYPE",
-            "Invalid module type"
-        };
-    }
+        if (!is_identifier(heartbeat->module_id)) {
+            return {
+                ValidationStatus::Rejected,
+                "MODULE_ID",
+                "Invalid module id"
+            };
+        }
 
-    if (!is_identifier(hello->module_id)) {
-        return {
-            ValidationStatus::Rejected,
-            "MODULE_ID",
-            "Invalid module id"
-        };
-    }
+        if (!is_message_id(heartbeat->message_id)) {
+            return {
+                ValidationStatus::Rejected,
+                "MSG",
+                "Invalid message id"
+            };
+        }
 
-    if (!is_firmware_version(hello->firmware_version)) {
         return {
-            ValidationStatus::Rejected,
-            "FW",
-            "Invalid firmware"
-        };
-    }
-
-    if (!is_message_id(hello->message_id)) {
-        return {
-            ValidationStatus::Rejected,
-            "MSG",
-            "Invalid message id"
+            ValidationStatus::Valid,
+            "",
+            ""
         };
     }
 
     return {
-        ValidationStatus::Valid,
-        "",
-        ""
+        ValidationStatus::Rejected,
+        "UNSUPPORTED",
+        "Only HELLO and HEARTBEAT are supported"
     };
 }
 

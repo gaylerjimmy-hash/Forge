@@ -28,6 +28,43 @@ int run_message_serializer_tests() {
 
     {
         const Message message{
+            HeartbeatMessage{
+                "00000042",
+                "scale01",
+                "81A9C5D2",
+                1042,
+                381500,
+                ModuleState::Ready,
+                0
+            }
+        };
+
+        const std::string expected =
+            "HEARTBEAT\n"
+            "MSG=00000042\n"
+            "ID=scale01\n"
+            "SESSION=81A9C5D2\n"
+            "SEQ=1042\n"
+            "UPTIME_MS=381500\n"
+            "STATE=ready\n"
+            "FAULTS=0\n"
+            "END\n";
+
+        const std::string serialized = serializer.serialize(message);
+        expect(serialized == expected);
+
+        const auto parsed = parser.parse(frame(serialized));
+        expect(parsed.ok());
+        expect(
+            parsed.message &&
+            std::holds_alternative<HeartbeatMessage>(
+                parsed.message->payload
+            )
+        );
+    }
+
+    {
+        const Message message{
             HelloMessage{
                 "00000001",
                 "Scale",

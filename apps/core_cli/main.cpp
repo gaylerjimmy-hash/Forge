@@ -7,7 +7,8 @@ int main() {
     automation_core::ConsoleTransport transport;
     automation_core::Core core(transport, std::cerr);
 
-    core.poll_once();
+    while (core.poll_once()) {
+    }
 
     return 0;
 }

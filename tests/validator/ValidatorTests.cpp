@@ -85,6 +85,59 @@ void test_rejects_unsupported_message() {
     );
 }
 
+void test_validates_heartbeat() {
+    const Validator validator{"1"};
+    const Message valid{
+        HeartbeatMessage{
+            "msg-42",
+            "scale-01",
+            "81A9C5D2",
+            42,
+            1000,
+            ModuleState::Ready,
+            0
+        }
+    };
+
+    expect(
+        validator.validate(valid).valid(),
+        "valid HEARTBEAT was rejected"
+    );
+
+    Message invalid_session = valid;
+    std::get<HeartbeatMessage>(
+        invalid_session.payload
+    ).session_id = "BAD";
+    expect_rejected(
+        invalid_session,
+        validator,
+        "SESSION",
+        "heartbeat with invalid session"
+    );
+
+    Message invalid_module = valid;
+    std::get<HeartbeatMessage>(
+        invalid_module.payload
+    ).module_id = "1scale";
+    expect_rejected(
+        invalid_module,
+        validator,
+        "MODULE_ID",
+        "heartbeat with invalid module ID"
+    );
+
+    Message invalid_message = valid;
+    std::get<HeartbeatMessage>(
+        invalid_message.payload
+    ).message_id = "msg.42";
+    expect_rejected(
+        invalid_message,
+        validator,
+        "MSG",
+        "heartbeat with invalid message ID"
+    );
+}
+
 void test_rejects_protocol_mismatch() {
     const Validator validator{"1"};
     Message message = make_hello();
@@ -312,6 +365,7 @@ int run_validator_tests() {
     failures = 0;
 
     test_accepts_valid_hello();
+    test_validates_heartbeat();
     test_rejects_unsupported_message();
     test_rejects_protocol_mismatch();
     test_validates_session_id();

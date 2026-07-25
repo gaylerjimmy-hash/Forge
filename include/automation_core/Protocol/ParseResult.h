@@ -16,6 +16,7 @@ enum class ParseError {
     DuplicateField,
     MissingField,
     EmptyValue,
+    InvalidValue,
     MissingTerminator,
     TrailingData
 };

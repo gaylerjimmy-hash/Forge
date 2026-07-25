@@ -64,7 +64,48 @@ int run_parser_tests() {
 
     {
         const auto result = parser.parse(frame(
-            "HEARTBEAT\nMSG=1\nEND\n"
+            "HEARTBEAT\n"
+            "MSG=42\n"
+            "ID=scale01\n"
+            "SESSION=81A9C5D2\n"
+            "SEQ=1042\n"
+            "UPTIME_MS=381500\n"
+            "STATE=ready\n"
+            "FAULTS=0\n"
+            "END\n"
+        ));
+        expect(result.ok());
+        const auto* heartbeat = result.message
+            ? std::get_if<HeartbeatMessage>(&result.message->payload)
+            : nullptr;
+        expect(heartbeat != nullptr);
+        if (heartbeat != nullptr) {
+            expect(heartbeat->sequence == 1042);
+            expect(heartbeat->uptime_ms == 381500);
+            expect(heartbeat->state == ModuleState::Ready);
+            expect(heartbeat->active_fault_count == 0);
+        }
+    }
+
+    {
+        const auto result = parser.parse(frame(
+            "HEARTBEAT\n"
+            "MSG=42\n"
+            "ID=scale01\n"
+            "SESSION=81A9C5D2\n"
+            "SEQ=not-a-number\n"
+            "UPTIME_MS=381500\n"
+            "STATE=ready\n"
+            "FAULTS=0\n"
+            "END\n"
+        ));
+        expect(!result.ok());
+        expect(result.error == ParseError::InvalidValue);
+    }
+
+    {
+        const auto result = parser.parse(frame(
+            "UNKNOWN\nMSG=1\nEND\n"
         ));
         expect(!result.ok());
         expect(result.error == ParseError::UnknownMessageType);

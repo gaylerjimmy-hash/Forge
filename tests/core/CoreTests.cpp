@@ -69,6 +69,25 @@ std::string hello(
         "END\n";
 }
 
+std::string heartbeat(
+    const std::string& message_id = "heartbeat-1",
+    const std::string& module_id = "scale-01",
+    const std::string& session_id = "81A9C5D2",
+    const std::uint32_t sequence = 1,
+    const std::uint64_t uptime_ms = 1000
+) {
+    return
+        "HEARTBEAT\n"
+        "MSG=" + message_id + "\n"
+        "ID=" + module_id + "\n"
+        "SESSION=" + session_id + "\n"
+        "SEQ=" + std::to_string(sequence) + "\n"
+        "UPTIME_MS=" + std::to_string(uptime_ms) + "\n"
+        "STATE=ready\n"
+        "FAULTS=0\n"
+        "END\n";
+}
+
 void test_no_packet_is_a_no_op() {
     FakeTransport transport;
     Core core{transport};
@@ -76,6 +95,26 @@ void test_no_packet_is_a_no_op() {
     core.poll_once();
 
     expect(transport.sent.empty(), "empty poll produced a response");
+}
+
+void test_scheduler_clock_advances_on_idle_poll() {
+    FakeTransport transport;
+    int clock_reads = 0;
+    Core core{
+        transport,
+        [&clock_reads] {
+            ++clock_reads;
+            return Core::TimePoint{};
+        }
+    };
+
+    core.poll_once();
+    core.poll_once();
+
+    expect(
+        clock_reads == 2,
+        "idle polls did not advance the scheduler clock"
+    );
 }
 
 void test_valid_hello_produces_ack() {
@@ -198,7 +237,7 @@ void test_parse_error_produces_error_response() {
     Core core{transport};
     transport.incoming.push_back({
         "serial:device-1",
-        "HEARTBEAT\nMSG=msg-1\nEND\n"
+        "UNKNOWN\nMSG=msg-1\nEND\n"
     });
 
     core.poll_once();
@@ -610,12 +649,372 @@ void test_empty_transport_connection_is_ignored() {
     );
 }
 
+void test_idle_tick_expires_module_and_requires_rediscovery() {
+    FakeTransport transport;
+    Core::TimePoint now{};
+    Core core{
+        transport,
+        [&now] { return now; },
+        std::chrono::milliseconds{3000}
+    };
+
+    transport.incoming.push_back({"serial:device-1", hello()});
+    core.poll_once();
+
+    now += std::chrono::seconds{1};
+    transport.incoming.push_back({
+        "serial:device-1",
+        heartbeat()
+    });
+    core.poll_once();
+
+    now += std::chrono::seconds{3};
+    core.poll_once();
+
+    transport.incoming.push_back({
+        "serial:device-1",
+        heartbeat("heartbeat-2", "scale-01", "81A9C5D2", 2, 4000)
+    });
+    core.poll_once();
+
+    expect(
+        transport.sent.size() == 2,
+        "offline heartbeat did not produce one error"
+    );
+
+    if (transport.sent.size() == 2) {
+        expect(
+            transport.sent[1].payload.find(
+                "CODE=MODULE_OFFLINE\n"
+            ) != std::string::npos,
+            "offline module heartbeat was not rejected"
+        );
+    }
+
+    now += std::chrono::milliseconds{1};
+    transport.incoming.push_back({
+        "serial:device-1",
+        hello("msg-2", "scale-01", "AAAAAAAA")
+    });
+    core.poll_once();
+
+    expect(
+        transport.sent.size() == 3 &&
+        transport.sent[2].payload.find("HELLO_ACK\n") !=
+            std::string::npos,
+        "offline module could not rediscover"
+    );
+}
+
+void test_valid_and_duplicate_heartbeat_are_silent() {
+    FakeTransport transport;
+    Core core{transport};
+    transport.incoming.push_back({"serial:device-1", hello()});
+    transport.incoming.push_back({
+        "serial:device-1",
+        heartbeat()
+    });
+    transport.incoming.push_back({
+        "serial:device-1",
+        heartbeat("heartbeat-2")
+    });
+
+    core.poll_once();
+    core.poll_once();
+    core.poll_once();
+
+    expect(
+        transport.sent.size() == 1,
+        "valid or duplicate heartbeat produced a wire response"
+    );
+}
+
+void test_heartbeat_ordering_and_rollover_through_core() {
+    FakeTransport stale_transport;
+    Core stale_core{stale_transport};
+    stale_transport.incoming.push_back({
+        "serial:device-1",
+        hello()
+    });
+    stale_transport.incoming.push_back({
+        "serial:device-1",
+        heartbeat("heartbeat-1", "scale-01", "81A9C5D2", 10, 1000)
+    });
+    stale_transport.incoming.push_back({
+        "serial:device-1",
+        heartbeat("heartbeat-2", "scale-01", "81A9C5D2", 9, 1100)
+    });
+
+    stale_core.poll_once();
+    stale_core.poll_once();
+    stale_core.poll_once();
+
+    expect(
+        stale_transport.sent.size() == 2 &&
+        stale_transport.sent[1].payload.find(
+            "CODE=HEARTBEAT_ORDER\n"
+        ) != std::string::npos,
+        "out-of-order heartbeat was not rejected through Core"
+    );
+
+    FakeTransport rollover_transport;
+    Core rollover_core{rollover_transport};
+    rollover_transport.incoming.push_back({
+        "serial:device-1",
+        hello()
+    });
+    rollover_transport.incoming.push_back({
+        "serial:device-1",
+        heartbeat(
+            "heartbeat-1",
+            "scale-01",
+            "81A9C5D2",
+            UINT32_MAX,
+            1000
+        )
+    });
+    rollover_transport.incoming.push_back({
+        "serial:device-1",
+        heartbeat("heartbeat-2", "scale-01", "81A9C5D2", 0, 1100)
+    });
+
+    rollover_core.poll_once();
+    rollover_core.poll_once();
+    rollover_core.poll_once();
+
+    expect(
+        rollover_transport.sent.size() == 1,
+        "valid heartbeat rollover produced an error"
+    );
+}
+
+void test_heartbeat_identity_errors_through_core() {
+    FakeTransport unknown;
+    Core unknown_core{unknown};
+    unknown.incoming.push_back({
+        "serial:device-1",
+        heartbeat()
+    });
+    unknown_core.poll_once();
+
+    expect(
+        unknown.sent.size() == 1 &&
+        unknown.sent[0].payload.find("CODE=UNKNOWN_MODULE\n") !=
+            std::string::npos,
+        "unknown heartbeat module was not rejected through Core"
+    );
+
+    FakeTransport mismatch;
+    Core mismatch_core{mismatch};
+    mismatch.incoming.push_back({"serial:device-1", hello()});
+    mismatch.incoming.push_back({
+        "serial:device-2",
+        heartbeat()
+    });
+    mismatch.incoming.push_back({
+        "serial:device-1",
+        heartbeat(
+            "heartbeat-2",
+            "scale-01",
+            "AAAAAAAA"
+        )
+    });
+
+    mismatch_core.poll_once();
+    mismatch_core.poll_once();
+    mismatch_core.poll_once();
+
+    expect(
+        mismatch.sent.size() == 3 &&
+        mismatch.sent[1].payload.find("CODE=CONNECTION_MISMATCH\n") !=
+            std::string::npos &&
+        mismatch.sent[2].payload.find("CODE=SESSION_MISMATCH\n") !=
+            std::string::npos,
+        "heartbeat connection or session mismatch was not rejected"
+    );
+}
+
+void test_invalid_heartbeat_values_through_core() {
+    expect_core_error(
+        "HEARTBEAT\n"
+        "MSG=heartbeat-1\n"
+        "ID=scale-01\n"
+        "SESSION=81A9C5D2\n"
+        "SEQ=1\n"
+        "UPTIME_MS=1000\n"
+        "STATE=offline\n"
+        "FAULTS=0\n"
+        "END\n",
+        "INVALID_VALUE",
+        "invalid heartbeat state"
+    );
+
+    expect_core_error(
+        "HEARTBEAT\n"
+        "MSG=heartbeat-1\n"
+        "ID=scale-01\n"
+        "SESSION=81A9C5D2\n"
+        "SEQ=4294967296\n"
+        "UPTIME_MS=1000\n"
+        "STATE=ready\n"
+        "FAULTS=0\n"
+        "END\n",
+        "INVALID_VALUE",
+        "overflowing heartbeat sequence"
+    );
+
+    expect_core_error(
+        "HEARTBEAT\n"
+        "MSG=heartbeat-1\n"
+        "ID=scale-01\n"
+        "SESSION=81A9C5D2\n"
+        "SEQ=1\n"
+        "UPTIME_MS=1000\n"
+        "STATE=ready\n"
+        "FAULTS=4294967296\n"
+        "END\n",
+        "INVALID_VALUE",
+        "overflowing heartbeat fault count"
+    );
+}
+
+void test_uptime_regression_and_quarantine_through_core() {
+    FakeTransport regression;
+    Core regression_core{regression};
+    regression.incoming.push_back({"serial:device-1", hello()});
+    regression.incoming.push_back({
+        "serial:device-1",
+        heartbeat("heartbeat-1", "scale-01", "81A9C5D2", 1, 1000)
+    });
+    regression.incoming.push_back({
+        "serial:device-1",
+        heartbeat("heartbeat-2", "scale-01", "81A9C5D2", 2, 999)
+    });
+
+    regression_core.poll_once();
+    regression_core.poll_once();
+    regression_core.poll_once();
+
+    expect(
+        regression.sent.size() == 2 &&
+        regression.sent[1].payload.find("CODE=UPTIME_REGRESSION\n") !=
+            std::string::npos,
+        "uptime regression was not surfaced through Core"
+    );
+
+    FakeTransport quarantine;
+    Core quarantine_core{quarantine};
+    quarantine.incoming.push_back({
+        "serial:device-1",
+        hello("msg-1", "scale-01", "81A9C5D2")
+    });
+    quarantine.incoming.push_back({
+        "serial:device-2",
+        hello("msg-2", "scale-01", "AAAAAAAA")
+    });
+    quarantine.incoming.push_back({
+        "serial:device-2",
+        heartbeat(
+            "heartbeat-1",
+            "scale-01",
+            "AAAAAAAA"
+        )
+    });
+
+    quarantine_core.poll_once();
+    quarantine_core.poll_once();
+    quarantine_core.poll_once();
+
+    expect(
+        quarantine.sent.size() == 3 &&
+        quarantine.sent[2].payload.find(
+            "CODE=CONNECTION_QUARANTINED\n"
+        ) != std::string::npos,
+        "quarantined connection delivered a heartbeat"
+    );
+}
+
+void test_health_lifecycle_tracing() {
+    FakeTransport transport;
+    std::ostringstream trace;
+    Core::TimePoint now{};
+    Core core{
+        transport,
+        trace,
+        [&now] { return now; },
+        std::chrono::milliseconds{3000}
+    };
+
+    transport.incoming.push_back({"serial:device-1", hello()});
+    transport.incoming.push_back({
+        "serial:device-1",
+        heartbeat()
+    });
+    transport.incoming.push_back({
+        "serial:device-1",
+        heartbeat("heartbeat-2")
+    });
+
+    static_cast<void>(core.poll_once());
+    now += std::chrono::seconds{1};
+    static_cast<void>(core.poll_once());
+    now += std::chrono::seconds{1};
+    static_cast<void>(core.poll_once());
+    now += std::chrono::seconds{2};
+    static_cast<void>(core.poll_once());
+
+    const std::string output = trace.str();
+
+    for (const std::string event : {
+        "event=heartbeat_accepted",
+        "event=heartbeat_duplicate",
+        "event=module_offline"
+    }) {
+        expect(
+            output.find(event) != std::string::npos,
+            "health trace is missing " + event
+        );
+    }
+
+    expect(
+        output.find("state=ready seq=1 uptime_ms=1000 faults=0") !=
+            std::string::npos,
+        "heartbeat trace omitted health fields"
+    );
+}
+
+void test_reboot_suspicion_is_traced() {
+    FakeTransport transport;
+    std::ostringstream trace;
+    Core core{transport, trace};
+    transport.incoming.push_back({"serial:device-1", hello()});
+    transport.incoming.push_back({
+        "serial:device-1",
+        heartbeat("heartbeat-1", "scale-01", "81A9C5D2", 1, 1000)
+    });
+    transport.incoming.push_back({
+        "serial:device-1",
+        heartbeat("heartbeat-2", "scale-01", "81A9C5D2", 2, 999)
+    });
+
+    static_cast<void>(core.poll_once());
+    static_cast<void>(core.poll_once());
+    static_cast<void>(core.poll_once());
+
+    expect(
+        trace.str().find("event=module_reboot_suspected") !=
+            std::string::npos,
+        "uptime regression did not trace suspected reboot"
+    );
+}
+
 } // namespace
 
 int run_core_tests() {
     failures = 0;
 
     test_no_packet_is_a_no_op();
+    test_scheduler_clock_advances_on_idle_poll();
     test_valid_hello_produces_ack();
     test_trace_reports_discovery_lifecycle();
     test_transport_connection_is_reused();
@@ -633,6 +1032,14 @@ int run_core_tests() {
     test_quarantined_transport_cannot_reopen();
     test_reconnect_becomes_authoritative_binding();
     test_empty_transport_connection_is_ignored();
+    test_idle_tick_expires_module_and_requires_rediscovery();
+    test_valid_and_duplicate_heartbeat_are_silent();
+    test_heartbeat_ordering_and_rollover_through_core();
+    test_heartbeat_identity_errors_through_core();
+    test_invalid_heartbeat_values_through_core();
+    test_uptime_regression_and_quarantine_through_core();
+    test_health_lifecycle_tracing();
+    test_reboot_suspicion_is_traced();
 
     return failures;
 }

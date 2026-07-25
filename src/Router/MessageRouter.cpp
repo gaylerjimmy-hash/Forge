@@ -18,25 +18,32 @@ MessageRouter::MessageRouter(
 
 RouteResult MessageRouter::route(
     const std::string& connection_id,
-    const Message& message
+    const Message& message,
+    const ModuleRegistry::TimePoint now
 ) {
     const auto* hello = std::get_if<HelloMessage>(&message.payload);
+    const auto* heartbeat =
+        std::get_if<HeartbeatMessage>(&message.payload);
 
-    if (hello == nullptr) {
+    if (hello == nullptr && heartbeat == nullptr) {
         return {
             responses_.error(
                 "",
                 "UNSUPPORTED",
-                "Only HELLO messages are currently supported"
+                "Only HELLO and HEARTBEAT messages are supported"
             ),
             "Unsupported message type"
         };
     }
 
     if (connection_id.empty()) {
+        const std::string message_id = hello != nullptr
+            ? hello->message_id
+            : heartbeat->message_id;
+
         return {
             responses_.error(
-                hello->message_id,
+                message_id,
                 "CONNECTION",
                 "Connection ID is required"
             ),
@@ -47,13 +54,38 @@ RouteResult MessageRouter::route(
     const ValidationResult validation = validator_.validate(message);
 
     if (!validation.valid()) {
+        const std::string message_id = hello != nullptr
+            ? hello->message_id
+            : heartbeat->message_id;
+
         return {
             responses_.error(
-                hello->message_id,
+                message_id,
                 validation.error_code,
                 validation.detail
             ),
             validation.detail
+        };
+    }
+
+    if (heartbeat != nullptr) {
+        const HeartbeatResult result =
+            registry_.update_heartbeat(connection_id, *heartbeat, now);
+
+        if (result.accepted()) {
+            return {
+                std::nullopt,
+                result.detail
+            };
+        }
+
+        return {
+            responses_.error(
+                heartbeat->message_id,
+                result.error_code,
+                result.detail
+            ),
+            result.detail
         };
     }
 
@@ -68,7 +100,7 @@ RouteResult MessageRouter::route(
     };
 
     const RegistrationResult registration =
-        registry_.register_module(module);
+        registry_.register_module(module, now);
 
     switch (registration.status) {
         case RegistrationStatus::Added:
