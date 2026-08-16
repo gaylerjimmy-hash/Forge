@@ -1,6 +1,10 @@
-# Forge OS — Milestone 3 Capability Discovery
+# Forge OS — Milestone 4 Measurement Ingestion
 
-Milestone 1 proves one narrow vertical slice:
+Forge OS is a C++17 reference implementation for coordinating modular
+automation hardware over the Forge Protocol v0.1 line-oriented `KEY=VALUE`
+wire format.
+
+The implemented vertical slice is:
 
 ```text
 Transport
@@ -10,27 +14,30 @@ Transport
     -> Protocol Validator
     -> Message Router
     -> Module Registry
-    -> HELLO_ACK / ERROR
+    -> HELLO_ACK / CAPABILITIES_ACK / ERROR
 ```
 
-This repository is intentionally skeletal. The discovery components are wired
-through `Core::poll_once`, and `ConsoleTransport` can read line-oriented frames
-from standard input and write responses to standard output. The CLI writes
-discovery lifecycle traces to standard error so standard output remains a
-machine-readable protocol channel. It processes frames until standard input
-reaches EOF and traces heartbeat health transitions without acknowledging
-successful heartbeats on the wire.
+`Core::poll_once` wires these components together. `ConsoleTransport` reads
+line-oriented frames from standard input and writes protocol responses to
+standard output. Lifecycle traces are written to standard error so standard
+output remains a machine-readable protocol channel.
 
-Milestone 2 extends that discovery slice with typed `HEARTBEAT` messages,
-authoritative registry health, deterministic sequence and uptime validation,
-monotonic offline timeouts, rediscovery requirements, and health lifecycle
-tracing.
+## Implemented Milestones
 
-Milestone 3 adds atomic, revisioned capability discovery so modules can
-self-describe measurements, commands, and configuration without module-type
-branches in Forge OS.
+- Milestone 1: module discovery, protocol validation, identity ownership,
+  reconnect handling, and quarantine.
+- Milestone 2: typed heartbeats, module health, sequence ordering, monotonic
+  offline timeouts, and rediscovery.
+- Milestone 3: atomic, revisioned capability discovery for measurements,
+  commands, and configuration.
+- Milestone 4: typed measurement ingestion, capability-aware validation,
+  per-capability sequence handling, freshness, invalidation, and lifecycle
+  tracing.
 
-## Build
+Successful heartbeats and measurements are intentionally not acknowledged on
+the wire. Rejections produce explicit, correlated `ERROR` messages.
+
+## Build and Test
 
 ```bash
 cmake -S . -B build
@@ -38,36 +45,16 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-## Milestone 1 Acceptance Criteria
+The Forge OS reference implementation and Module SDK target C++17. Python is
+limited to simulation, tooling, tests, utilities, and clients.
 
-Milestone 1 is accepted when the repository provides an end-to-end,
-line-oriented discovery path covering:
+## Current Boundary
 
-- HELLO
-- HELLO_ACK
-- ERROR
-- connection IDs
-- session IDs
-- message IDs
-- frame limits
-- frame timeout handling
-- protocol version validation
-- duplicate identity quarantine
-- CLI tracing
-- exhaustive failure-path tests
-
-Milestone 1 does not include:
-
-- MQTT
-- TCP
-- persistence
-- process engine
-- GUI
-- command transactions
-- capability discovery
-- real serial I/O
+Milestone 5 is command transactions. Real serial I/O, process execution,
+persistence, GUI/HMI work, MQTT, TCP, and ESP32 integration remain future
+work.
 
 The broader Forge v0.1 release definition includes module contracts,
 capabilities, measurements, command lifecycle, safety, recovery, simulation,
-and HMI behavior. Milestone 1 completion does not imply Forge v0.1 release
-readiness.
+and HMI behavior. Completing an individual milestone does not imply Forge v0.1
+release readiness.
