@@ -1,4 +1,4 @@
-# Forge OS — Milestone 4 Measurement Ingestion
+# Forge OS — Milestone 5 Command Transactions
 
 Forge OS is a C++17 reference implementation for coordinating modular
 automation hardware over the Forge Protocol v0.1 line-oriented `KEY=VALUE`
@@ -33,6 +33,9 @@ output remains a machine-readable protocol channel.
 - Milestone 4: typed measurement ingestion, capability-aware validation,
   per-capability sequence handling, freshness, invalidation, and lifecycle
   tracing.
+- Milestone 5: typed command transactions, capability-gated dispatch,
+  authoritative routing and correlation, explicit transaction states,
+  monotonic timeouts, authority-loss invalidation, and lifecycle tracing.
 
 Successful heartbeats and measurements are intentionally not acknowledged on
 the wire. Rejections produce explicit, correlated `ERROR` messages.
@@ -50,9 +53,9 @@ limited to simulation, tooling, tests, utilities, and clients.
 
 ## Current Boundary
 
-Milestone 5 is command transactions. Real serial I/O, process execution,
-persistence, GUI/HMI work, MQTT, TCP, and ESP32 integration remain future
-work.
+Milestone 6 is process orchestration built above the accepted measurement
+and command-transaction layers. Real serial I/O, persistence, GUI/HMI work,
+MQTT, TCP, and ESP32 integration remain future work.
 
 The broader Forge v0.1 release definition includes module contracts,
 capabilities, measurements, command lifecycle, safety, recovery, simulation,

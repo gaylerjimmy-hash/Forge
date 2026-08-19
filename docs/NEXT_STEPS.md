@@ -57,24 +57,45 @@ Core tests:
 
 ## Milestone 5 — Command Transactions
 
+Complete and covered by protocol, validator, serializer, and Core tests:
+
+- typed `COMMAND`, `COMMAND_ACK`, and `COMMAND_RESULT` messages
+- strict parsing, validation, and deterministic serialization
+- accepted command-capability and capability-revision validation
+- Core-owned authority-bound command transaction state machine
+- authoritative connection routing and ACK/RESULT correlation
+- rejection of invalid, duplicate, stale, and out-of-state responses
+- monotonic transaction timeouts and authority-loss invalidation
+- command lifecycle tracing
+- rejected acknowledgements require a non-empty rejection code
+- append-only Milestone 5 protocol documentation
+
+## Milestone 6 — Process Orchestration
+
 Next implementation milestone:
 
-1. Define line-oriented `COMMAND`, `COMMAND_ACK`, and `COMMAND_RESULT`.
-2. Record command identity, timeout, retry, and terminal-state semantics.
-3. Add typed C++17 command and argument models.
-4. Implement strict parsing and deterministic serialization.
-5. Validate commands against accepted command capabilities.
-6. Add a command transaction registry and deterministic state machine.
-7. Route commands over the module's authoritative connection.
-8. Correlate acknowledgements and results and reject invalid transitions.
-9. Add monotonic timeouts, disconnect invalidation, and lifecycle tracing.
-10. Add end-to-end coverage and run a clean build and full CTest suite.
+1. Define typed process, run, and step identities.
+2. Add an explicit non-blocking process execution state machine.
+3. Define ordered command steps and measurement-condition wait steps.
+4. Keep process coordination in Core-side orchestration; modules continue to
+   own hardware and local protective behavior.
+5. Dispatch command steps only through the accepted Milestone 5 command
+   transaction boundary.
+6. Evaluate measurement conditions only against operationally current accepted
+   measurement state.
+7. Use monotonic time for step and run deadlines; do not use blocking delays.
+8. Handle command rejection, failure, timeout, authority loss, stale or
+   unavailable measurements, and explicit abort deterministically.
+9. Correlate process, step, and command transaction traces.
+10. Add focused state-machine, failure-path, timeout, abort, and end-to-end
+    tests and run a clean build and full CTest suite.
 
-Milestone 5 excludes process orchestration. It establishes safe command
-transport and transaction lifecycle behavior for a later process engine.
+Milestone 6 does not add automatic retry, persistence, distributed execution,
+GUI/HMI behavior, or hardware safety logic. Retry or recovery policy must be
+introduced later as explicit state-machine behavior rather than hidden loops.
 
 ## Later Work
 
-Real serial I/O, process execution, persistence, GUI/HMI work, MQTT, TCP,
-ESP32 integration, and the broader safety and recovery model remain outside
-Milestones 1 through 5.
+Real serial I/O, persistence, GUI/HMI work, MQTT, TCP, ESP32 integration,
+and the broader safety and recovery model remain outside Milestones 1 through
+6.
