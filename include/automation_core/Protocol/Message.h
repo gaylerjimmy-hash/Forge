@@ -41,6 +41,39 @@ struct ErrorMessage {
     std::string detail;
 };
 
+// COMMAND is issued by Forge OS. TX is the stable transaction correlation
+// identifier; MSG identifies this particular wire message.
+struct CommandMessage {
+    std::string message_id;
+    std::string transaction_id;
+    std::string module_id;
+    std::string session_id;
+    std::string capability;
+    std::uint32_t capability_revision{0};
+    std::string payload;
+};
+
+struct CommandAckMessage {
+    std::string message_id;
+    std::string transaction_id;
+    std::string module_id;
+    std::string session_id;
+    bool accepted{false};
+    std::string code;
+    std::string detail;
+};
+
+struct CommandResultMessage {
+    std::string message_id;
+    std::string transaction_id;
+    std::string module_id;
+    std::string session_id;
+    bool success{false};
+    std::string result;
+    std::string code;
+    std::string detail;
+};
+
 using MessagePayload = std::variant<
     HelloMessage,
     HelloAckMessage,
@@ -48,7 +81,10 @@ using MessagePayload = std::variant<
     MeasurementMessage,
     CapabilitiesMessage,
     CapabilitiesAckMessage,
-    ErrorMessage
+    ErrorMessage,
+    CommandMessage,
+    CommandAckMessage,
+    CommandResultMessage
 >;
 
 struct Message {

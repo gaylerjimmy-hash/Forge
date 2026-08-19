@@ -95,6 +95,23 @@ std::string capabilities(
     return "CAPABILITIES\nMSG="+message_id+"\nID=scale-01\nSESSION=81A9C5D2\nREV="+std::to_string(revision)+"\nCOUNT=1\nITEM.0.NAME=weight\nITEM.0.TYPE=measurement\nITEM.0.DATA_TYPE=float\nITEM.0.ACCESS=read\nEND\n";
 }
 
+std::string command_capabilities() {
+    return "CAPABILITIES\nMSG=command-cap-1\nID=scale-01\nSESSION=81A9C5D2\nREV=2\nCOUNT=1\nITEM.0.NAME=tare\nITEM.0.TYPE=command\nITEM.0.ACCESS=command\nEND\n";
+}
+
+std::string command_ack(const std::string& transaction_id, const std::string& status = "ACCEPTED") {
+    const std::string rejection_code = status == "REJECTED" ? "CODE=COMMAND_DENIED\n" : "";
+    return "COMMAND_ACK\nMSG=ack-" + transaction_id + "\nTX=" + transaction_id + "\nID=scale-01\nSESSION=81A9C5D2\nSTATUS=" + status + "\n" + rejection_code + "END\n";
+}
+
+std::string command_result(const std::string& transaction_id, const std::string& status = "SUCCESS") {
+    return "COMMAND_RESULT\nMSG=result-" + transaction_id + "\nTX=" + transaction_id + "\nID=scale-01\nSESSION=81A9C5D2\nSTATUS=" + status + "\nRESULT=done\nEND\n";
+}
+
+CommandMessage tare_command(const std::string& transaction_id) {
+    return {"command-" + transaction_id, transaction_id, "scale-01", "81A9C5D2", "tare", 2, "now"};
+}
+
 std::string measurement(const std::string& quality="good") {
     return "MEASUREMENT\nMSG=measure-1\nID=scale-01\nSESSION=81A9C5D2\nCAP=weight\nSEQ=1\nVALUE=42.5\nQUALITY="+quality+"\nEND\n";
 }
@@ -1057,6 +1074,99 @@ void test_measurement_end_to_end() {
     expect(transport.sent.size()==3&&transport.sent.back().payload.find("CODE=INVALID_VALUE")!=std::string::npos,"reserved stale wire quality was not rejected");
 }
 
+void test_command_transaction_invalid_lifecycle_transitions() {
+    FakeTransport transport;
+    std::ostringstream trace;
+    Core core{transport, trace};
+    transport.incoming.push_back({"serial:device-1", hello()});
+    transport.incoming.push_back({"serial:device-1", command_capabilities()});
+    core.poll_once(); core.poll_once();
+
+    expect(core.dispatch_command(tare_command("tx-state")) == CommandRejection::None, "state-machine command was not dispatched");
+    transport.incoming.push_back({"serial:device-2", command_ack("tx-state")});
+    core.poll_once();
+    const auto wrong_connection_ack = core.find_command_transaction("tx-state");
+    expect(wrong_connection_ack && wrong_connection_ack->state == CommandTransactionState::Dispatched, "non-authoritative ACK changed transaction state");
+
+    transport.incoming.push_back({"serial:device-1", command_result("tx-state")});
+    core.poll_once();
+    const auto result_before_ack = core.find_command_transaction("tx-state");
+    expect(result_before_ack && result_before_ack->state == CommandTransactionState::Dispatched, "RESULT before ACK changed transaction state");
+
+    transport.incoming.push_back({"serial:device-1", command_ack("tx-state")});
+    core.poll_once();
+    const auto acknowledged = core.find_command_transaction("tx-state");
+    expect(acknowledged && acknowledged->state == CommandTransactionState::Acknowledged, "valid ACK did not advance transaction state");
+
+    transport.incoming.push_back({"serial:device-1", command_ack("tx-state")});
+    core.poll_once();
+    const auto duplicate_ack = core.find_command_transaction("tx-state");
+    expect(duplicate_ack && duplicate_ack->state == CommandTransactionState::Acknowledged, "duplicate ACK changed transaction state");
+    expect(trace.str().find("event=command_correlation_rejected") != std::string::npos, "Core did not trace rejected non-authoritative response");
+    expect(trace.str().find("event=command_lifecycle_rejected") != std::string::npos, "Core did not trace rejected lifecycle transitions");
+}
+
+void test_command_transaction_lifecycle_and_rejections() {
+    FakeTransport transport;
+    std::ostringstream trace;
+    Core core{transport, trace};
+    transport.incoming.push_back({"serial:device-1", hello()});
+    transport.incoming.push_back({"serial:device-1", command_capabilities()});
+    core.poll_once(); core.poll_once();
+
+    expect(core.dispatch_command(tare_command("tx-1")) == CommandRejection::None, "accepted command was not dispatched");
+    expect(transport.sent.size() == 3 && transport.sent.back().connection_id == "serial:device-1", "command was not routed over authority");
+    expect(core.dispatch_command(tare_command("tx-1")) == CommandRejection::Lifecycle, "duplicate transaction was accepted");
+    CommandMessage bad_revision = tare_command("tx-bad"); bad_revision.capability_revision = 1;
+    expect(core.dispatch_command(bad_revision) == CommandRejection::Capability, "unaccepted capability revision was routed");
+
+    transport.incoming.push_back({"serial:device-2", command_ack("tx-1")});
+    transport.incoming.push_back({"serial:device-1", command_result("tx-1")});
+    transport.incoming.push_back({"serial:device-1", command_ack("tx-1")});
+    transport.incoming.push_back({"serial:device-1", command_ack("tx-1")});
+    transport.incoming.push_back({"serial:device-1", command_result("missing")});
+    for (int i = 0; i != 5; ++i) core.poll_once();
+    const auto acknowledged = core.find_command_transaction("tx-1");
+    expect(acknowledged && acknowledged->state == CommandTransactionState::Acknowledged, "wrong-connection RESULT or duplicate ACK changed the transaction");
+
+    transport.incoming.push_back({"serial:device-1", command_result("tx-1")});
+    core.poll_once();
+    const auto completed = core.find_command_transaction("tx-1");
+    expect(completed && completed->state == CommandTransactionState::Succeeded, "correlated RESULT did not complete transaction");
+
+    expect(core.dispatch_command(tare_command("tx-2")) == CommandRejection::None, "second command was not dispatched");
+    transport.incoming.push_back({"serial:device-1", command_ack("tx-2", "REJECTED")});
+    core.poll_once();
+    const auto rejected = core.find_command_transaction("tx-2");
+    expect(rejected && rejected->state == CommandTransactionState::Rejected && rejected->rejection == CommandRejection::Lifecycle, "rejected ACK did not record rejection class");
+    for (const std::string event : {"event=command_dispatched", "event=command_correlation_rejected", "event=command_lifecycle_rejected", "event=command_result", "event=command_rejected"})
+        expect(trace.str().find(event) != std::string::npos, "command trace is missing " + event);
+}
+
+void test_command_timeout_and_authority_loss() {
+    FakeTransport timeout_transport;
+    Core::TimePoint now{};
+    Core timeout_core{timeout_transport, [&now] { return now; }, std::chrono::milliseconds{3000}};
+    timeout_transport.incoming.push_back({"serial:device-1", hello()});
+    timeout_transport.incoming.push_back({"serial:device-1", command_capabilities()});
+    timeout_core.poll_once(); timeout_core.poll_once();
+    expect(timeout_core.dispatch_command(tare_command("tx-timeout"), std::chrono::milliseconds{10}) == CommandRejection::None, "timeout command was not dispatched");
+    now += std::chrono::milliseconds{10}; timeout_core.poll_once();
+    const auto timed_out = timeout_core.find_command_transaction("tx-timeout");
+    expect(timed_out && timed_out->state == CommandTransactionState::TimedOut && timed_out->rejection == CommandRejection::Timeout, "monotonic deadline did not expire command");
+
+    FakeTransport loss_transport;
+    Core::TimePoint loss_now{};
+    Core loss_core{loss_transport, [&loss_now] { return loss_now; }, std::chrono::milliseconds{3}};
+    loss_transport.incoming.push_back({"serial:device-1", hello()});
+    loss_transport.incoming.push_back({"serial:device-1", command_capabilities()});
+    loss_core.poll_once(); loss_core.poll_once();
+    expect(loss_core.dispatch_command(tare_command("tx-loss")) == CommandRejection::None, "authority-loss command was not dispatched");
+    loss_now += std::chrono::milliseconds{3}; loss_core.poll_once();
+    const auto lost = loss_core.find_command_transaction("tx-loss");
+    expect(lost && lost->state == CommandTransactionState::AuthorityLost && lost->rejection == CommandRejection::AuthorityLoss, "authority loss did not invalidate transaction");
+}
+
 } // namespace
 
 int run_core_tests() {
@@ -1092,6 +1202,9 @@ int run_core_tests() {
     test_capability_lifecycle_tracing();
     test_capability_revision_conflict_through_core();
     test_measurement_end_to_end();
+    test_command_transaction_invalid_lifecycle_transitions();
+    test_command_transaction_lifecycle_and_rejections();
+    test_command_timeout_and_authority_loss();
 
     return failures;
 }

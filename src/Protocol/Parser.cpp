@@ -85,6 +85,35 @@ ParseResult parse_capabilities(const std::vector<std::string>& lines) {
     return {Message{CapabilitiesMessage{fields["MSG"],fields["ID"],fields["SESSION"],*rev,std::move(items)}},ParseError::None,{}};
 }
 
+ParseResult parse_command_message(const std::vector<std::string>& lines, const std::string& type) {
+    const bool command = type == "COMMAND";
+    const bool ack = type == "COMMAND_ACK";
+    const std::unordered_set<std::string> required = command
+        ? std::unordered_set<std::string>{"MSG","TX","ID","SESSION","CAP","CAP_REV","PAYLOAD"}
+        : std::unordered_set<std::string>{"MSG","TX","ID","SESSION","STATUS"};
+    const std::unordered_set<std::string> allowed = command
+        ? required : std::unordered_set<std::string>{"MSG","TX","ID","SESSION","STATUS","CODE","DETAIL","RESULT"};
+    std::unordered_map<std::string, std::string> fields;
+    bool ended = false;
+    for (std::size_t i=1; i<lines.size(); ++i) {
+        if (lines[i] == "END") { ended=true; for (++i;i<lines.size();++i) if (!lines[i].empty()) return failure(ParseError::TrailingData,"Data appears after END."); break; }
+        const auto p=lines[i].find('=');
+        if (p==std::string::npos || p==0 || p==lines[i].size()-1 || lines[i].find('=',p+1)!=std::string::npos) return failure(ParseError::MalformedField,"Malformed field: "+lines[i]);
+        const auto key=lines[i].substr(0,p);
+        if (!allowed.count(key)) return failure(ParseError::UnknownField,"Unknown field: "+key);
+        if (!fields.emplace(key,lines[i].substr(p+1)).second) return failure(ParseError::DuplicateField,"Duplicate field: "+key);
+    }
+    if (!ended) return failure(ParseError::MissingTerminator,"Message is missing END.");
+    for (const auto& key:required) if (!fields.count(key)) return failure(ParseError::MissingField,"Missing required field: "+key);
+    if (command) { auto rev=parse_unsigned_integer<std::uint32_t>(fields["CAP_REV"]); if(!rev) return failure(ParseError::InvalidValue,"Invalid CAP_REV."); return {Message{CommandMessage{fields["MSG"],fields["TX"],fields["ID"],fields["SESSION"],fields["CAP"],*rev,fields["PAYLOAD"]}},ParseError::None,{}}; }
+    const bool accepted=fields["STATUS"]=="ACCEPTED"; const bool rejected=fields["STATUS"]=="REJECTED";
+    if (!accepted && !rejected && !(type=="COMMAND_RESULT" && fields["STATUS"]=="SUCCESS") && !(type=="COMMAND_RESULT" && fields["STATUS"]=="FAILURE")) return failure(ParseError::InvalidValue,"Invalid STATUS.");
+    if (ack && rejected && !fields.count("CODE")) return failure(ParseError::MissingField,"Rejected COMMAND_ACK requires CODE.");
+    if (ack) return {Message{CommandAckMessage{fields["MSG"],fields["TX"],fields["ID"],fields["SESSION"],accepted,fields["CODE"],fields["DETAIL"]}},ParseError::None,{}};
+    const bool success=fields["STATUS"]=="SUCCESS";
+    return {Message{CommandResultMessage{fields["MSG"],fields["TX"],fields["ID"],fields["SESSION"],success,fields["RESULT"],fields["CODE"],fields["DETAIL"]}},ParseError::None,{}};
+}
+
 ParseResult parse_measurement(const std::vector<std::string>& lines) {
     const std::unordered_set<std::string> required{
         "MSG", "ID", "SESSION", "CAP", "SEQ", "VALUE", "QUALITY"
@@ -168,6 +197,9 @@ ParseResult Parser::parse(const Frame& frame) const {
     }
     if (lines.front() == "MEASUREMENT") {
         return parse_measurement(lines);
+    }
+    if (lines.front() == "COMMAND" || lines.front() == "COMMAND_ACK" || lines.front() == "COMMAND_RESULT") {
+        return parse_command_message(lines, lines.front());
     }
 
     const bool is_hello = lines.front() == "HELLO";

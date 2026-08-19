@@ -7,6 +7,7 @@
 #include <string>
 #include <utility>
 #include <variant>
+#include <type_traits>
 
 namespace automation_core {
 namespace {
@@ -128,6 +129,24 @@ Core::Core(
       router_(validator_, registry_, responses_),
       transport_connections_() {}
 
+CommandRejection Core::dispatch_command(CommandMessage command, const std::chrono::milliseconds timeout) {
+    const auto module = registry_.find(command.module_id);
+    if (!module || module->status != ModuleStatus::Active || module->session_id != command.session_id) return CommandRejection::Routing;
+    if (!module->has_capabilities || !module->capabilities_available) return CommandRejection::Capability;
+    const auto valid = validator_.validate_command(command, module->capabilities, module->capability_revision);
+    if (!valid.valid()) return CommandRejection::Capability;
+    if (command_transactions_.count(command.transaction_id)) return CommandRejection::Lifecycle;
+    CommandTransaction transaction{command, module->connection_id, CommandTransactionState::Dispatched, CommandRejection::None, now_()+timeout, {"dispatched"}};
+    std::string transport_connection;
+    for (const auto& mapping : transport_connections_) if (mapping.second == module->connection_id) { transport_connection=mapping.first; break; }
+    if (transport_connection.empty()) return CommandRejection::Routing;
+    const bool sent=transport_.send(transport_connection, serializer_.serialize(Message{command}));
+    if (!sent) { transaction.state=CommandTransactionState::Rejected; transaction.rejection=CommandRejection::Routing; transaction.trace.push_back("routing_rejected"); command_transactions_.emplace(command.transaction_id,std::move(transaction)); return CommandRejection::Routing; }
+    command_transactions_.emplace(command.transaction_id,std::move(transaction)); trace("command_dispatched",command.transaction_id); return CommandRejection::None;
+}
+
+std::optional<CommandTransaction> Core::find_command_transaction(const std::string& transaction_id) const { const auto it=command_transactions_.find(transaction_id); if(it==command_transactions_.end()) return std::nullopt; return it->second; }
+
 void Core::trace(
     const std::string& event,
     const std::string& detail
@@ -153,7 +172,9 @@ bool Core::poll_once() {
     for (const auto& module_id : expired_modules) {
         trace("module_offline", module_id + ": heartbeat timeout");
         trace("measurement_unavailable", module_id);
+        for (auto& entry : command_transactions_) if (entry.second.command.module_id==module_id && (entry.second.state==CommandTransactionState::Dispatched || entry.second.state==CommandTransactionState::Acknowledged)) { entry.second.state=CommandTransactionState::AuthorityLost; entry.second.rejection=CommandRejection::AuthorityLoss; entry.second.trace.push_back("authority_lost"); trace("command_authority_lost",entry.first); }
     }
+    for (auto& entry : command_transactions_) if ((entry.second.state==CommandTransactionState::Dispatched || entry.second.state==CommandTransactionState::Acknowledged) && now >= entry.second.deadline) { entry.second.state=CommandTransactionState::TimedOut; entry.second.rejection=CommandRejection::Timeout; entry.second.trace.push_back("timed_out"); trace("command_timeout",entry.first); }
     const auto stale_measurements=registry_.expire_measurements(measurement_timeout_,now);
     for(const auto& name:stale_measurements)trace("measurement_stale",name);
 
@@ -282,6 +303,23 @@ bool Core::poll_once() {
     }
 
     trace("parse_accepted", connection_id);
+
+    const auto handle_command_response = [&](const auto& response, const bool /* acknowledgement */) -> bool {
+        const auto it=command_transactions_.find(response.transaction_id);
+        if (it==command_transactions_.end() || it->second.connection_id!=connection_id || it->second.command.module_id!=response.module_id || it->second.command.session_id!=response.session_id) { trace("command_correlation_rejected",response.transaction_id); return true; }
+        auto& transaction=it->second;
+        if constexpr (std::is_same_v<std::decay_t<decltype(response)>, CommandAckMessage>) {
+            if (transaction.state!=CommandTransactionState::Dispatched) { trace("command_lifecycle_rejected",response.transaction_id); return true; }
+            if (response.accepted) { transaction.state=CommandTransactionState::Acknowledged; transaction.trace.push_back("acknowledged"); trace("command_acknowledged",response.transaction_id); }
+            else { transaction.state=CommandTransactionState::Rejected; transaction.rejection=CommandRejection::Lifecycle; transaction.trace.push_back("ack_rejected"); trace("command_rejected",response.transaction_id); }
+        } else {
+            if (transaction.state!=CommandTransactionState::Acknowledged) { trace("command_lifecycle_rejected",response.transaction_id); return true; }
+            transaction.state=response.success?CommandTransactionState::Succeeded:CommandTransactionState::Failed; transaction.rejection=response.success?CommandRejection::None:CommandRejection::Lifecycle; transaction.trace.push_back(response.success?"result_success":"result_failure"); trace("command_result",response.transaction_id);
+        }
+        return true;
+    };
+    if (const auto* ack=std::get_if<CommandAckMessage>(&parse_result.message->payload)) return handle_command_response(*ack,true);
+    if (const auto* result=std::get_if<CommandResultMessage>(&parse_result.message->payload)) return handle_command_response(*result,false);
 
     const RouteResult route_result =
         router_.route(

@@ -198,3 +198,61 @@ Successful measurements are not acknowledged. Rejections return correlated
 - Protocol compatibility is validated before registration.
 - Duplicate module identities are quarantined unless proven to be the same module reconnecting.
 - Responses correlate to requests using `MSG`.
+
+## Milestone 5 — Command transaction lifecycle
+
+`COMMAND` is emitted only by Forge OS to an active authoritative module.
+`TX` is the durable transaction correlation identifier and `MSG` identifies an
+individual wire message. `CAP_REV` must equal the accepted capability document
+revision and `CAP` must name an accepted command capability.
+
+```text
+COMMAND
+MSG=cmd-1
+TX=tx-1
+ID=scale01
+SESSION=81A9C5D2
+CAP=tare
+CAP_REV=4
+PAYLOAD=now
+END
+```
+
+A module replies first with `COMMAND_ACK`. `STATUS` is `ACCEPTED` or
+`REJECTED`; rejected acknowledgements include `CODE` and may include `DETAIL`.
+Only an accepted acknowledgement permits a final result.
+
+```text
+COMMAND_ACK
+MSG=ack-1
+TX=tx-1
+ID=scale01
+SESSION=81A9C5D2
+STATUS=ACCEPTED
+END
+```
+
+`COMMAND_RESULT` is terminal. Its `STATUS` is `SUCCESS` or `FAILURE`; it may
+carry `RESULT`, `CODE`, and `DETAIL`.
+
+```text
+COMMAND_RESULT
+MSG=result-1
+TX=tx-1
+ID=scale01
+SESSION=81A9C5D2
+STATUS=SUCCESS
+RESULT=completed
+END
+```
+
+The authoritative module identity, session, and connection must match the
+transaction for both responses. Duplicate, stale, mismatched, and
+invalid-state responses are rejected. Transactions are terminal on rejected
+acknowledgement, result, monotonic-clock timeout, or authority loss.
+
+### Milestone 5 clarification
+
+For `COMMAND_ACK`, `STATUS=REJECTED` requires a present, non-empty `CODE`.
+A rejected acknowledgement that omits `CODE` or supplies an empty value is
+malformed and must be rejected.

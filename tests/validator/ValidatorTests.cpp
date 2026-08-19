@@ -382,6 +382,33 @@ void test_validates_capabilities() {
     expect(validator.validate(message).valid(),"valid command capability rejected");
 }
 
+void test_validates_command_capability_and_transaction_fields() {
+    const Validator validator{"1"};
+    const Capability command_capability{"tare", CapabilityType::Command, std::nullopt, CapabilityAccess::Command};
+    const CommandMessage command{"cmd-1", "tx-1", "scale-01", "81A9C5D2", "tare", 3, "now"};
+    expect(validator.validate_command(command, {command_capability}, 3).valid(), "accepted command capability was rejected");
+    expect(validator.validate(Message{command}).valid(), "valid command transaction message was rejected");
+
+    const auto wrong_revision = validator.validate_command(command, {command_capability}, 4);
+    expect(wrong_revision.status == ValidationStatus::Rejected && wrong_revision.error_code == "COMMAND_CAPABILITY_REVISION", "command revision mismatch was accepted");
+    const auto missing_capability = validator.validate_command(command, {}, 3);
+    expect(missing_capability.status == ValidationStatus::Rejected && missing_capability.error_code == "COMMAND_CAPABILITY", "missing command capability was accepted");
+
+    CommandMessage malformed = command;
+    malformed.payload.clear();
+    const auto malformed_result = validator.validate_command(malformed, {command_capability}, 3);
+    expect(malformed_result.status == ValidationStatus::Rejected && malformed_result.error_code == "COMMAND_PROTOCOL", "empty command payload was accepted");
+
+    CommandAckMessage invalid_ack{"ack-1", "", "scale-01", "81A9C5D2", true, "", ""};
+    expect_rejected(Message{invalid_ack}, validator, "COMMAND_PROTOCOL", "invalid command acknowledgement");
+    CommandAckMessage rejected_ack_without_code{"ack-2", "tx-1", "scale-01", "81A9C5D2", false, "", ""};
+    expect_rejected(Message{rejected_ack_without_code}, validator, "COMMAND_PROTOCOL", "rejected command acknowledgement without code");
+    CommandAckMessage rejected_ack_with_code{"ack-3", "tx-1", "scale-01", "81A9C5D2", false, "COMMAND_DENIED", "not ready"};
+    expect(validator.validate(Message{rejected_ack_with_code}).valid(), "rejected command acknowledgement with code was rejected");
+    CommandResultMessage invalid_result{"result-1", "tx-1", "scale-01", "BAD", true, "done", "", ""};
+    expect_rejected(Message{invalid_result}, validator, "COMMAND_PROTOCOL", "invalid command result");
+}
+
 void test_validates_measurement() {
     Validator validator;
     MeasurementMessage value{"70","scale-01","81A9C5D2","weight",1,"42.5",MeasurementQuality::Good};
@@ -409,6 +436,7 @@ int run_validator_tests() {
     test_validates_message_id();
     test_validation_order_is_deterministic();
     test_validates_capabilities();
+    test_validates_command_capability_and_transaction_fields();
     test_validates_measurement();
 
     return failures;

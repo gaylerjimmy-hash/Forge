@@ -200,6 +200,23 @@ ValidationResult Validator::validate(const Message& message) const {
         return {ValidationStatus::Valid,"",""};
     }
 
+    const auto* command = std::get_if<CommandMessage>(&message.payload);
+    if (command != nullptr) {
+        if (!is_message_id(command->message_id) || !is_message_id(command->transaction_id)) return {ValidationStatus::Rejected,"COMMAND_CORRELATION","Invalid command correlation"};
+        if (!is_identifier(command->module_id) || !is_session_id(command->session_id) || !is_identifier(command->capability) || command->payload.empty()) return {ValidationStatus::Rejected,"COMMAND_PROTOCOL","Invalid command fields"};
+        return {ValidationStatus::Valid,"",""};
+    }
+    const auto* ack = std::get_if<CommandAckMessage>(&message.payload);
+    if (ack != nullptr) {
+        if (!is_message_id(ack->message_id) || !is_message_id(ack->transaction_id) || !is_identifier(ack->module_id) || !is_session_id(ack->session_id) || (!ack->accepted && ack->code.empty())) return {ValidationStatus::Rejected,"COMMAND_PROTOCOL","Invalid command acknowledgement"};
+        return {ValidationStatus::Valid,"",""};
+    }
+    const auto* result = std::get_if<CommandResultMessage>(&message.payload);
+    if (result != nullptr) {
+        if (!is_message_id(result->message_id) || !is_message_id(result->transaction_id) || !is_identifier(result->module_id) || !is_session_id(result->session_id)) return {ValidationStatus::Rejected,"COMMAND_PROTOCOL","Invalid command result"};
+        return {ValidationStatus::Valid,"",""};
+    }
+
     const auto* measurement = std::get_if<MeasurementMessage>(&message.payload);
     if (measurement != nullptr) {
         if (!is_message_id(measurement->message_id)) return {ValidationStatus::Rejected,"MSG","Invalid message id"};
@@ -218,6 +235,15 @@ ValidationResult Validator::validate(const Message& message) const {
         "UNSUPPORTED",
         "Unsupported message type"
     };
+}
+
+ValidationResult Validator::validate_command(const CommandMessage& command, const std::vector<Capability>& accepted_capabilities, const std::uint32_t accepted_revision) const {
+    const auto basic = validate(Message{command});
+    if (!basic.valid()) return basic;
+    if (command.capability_revision != accepted_revision) return {ValidationStatus::Rejected,"COMMAND_CAPABILITY_REVISION","Command capability revision is not accepted"};
+    const auto found = std::find_if(accepted_capabilities.begin(), accepted_capabilities.end(), [&](const Capability& item) { return item.name == command.capability && item.type == CapabilityType::Command && item.access == CapabilityAccess::Command; });
+    if (found == accepted_capabilities.end()) return {ValidationStatus::Rejected,"COMMAND_CAPABILITY","Command capability is not accepted"};
+    return {ValidationStatus::Valid,"",""};
 }
 
 } // namespace automation_core

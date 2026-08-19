@@ -76,6 +76,17 @@ std::string MessageSerializer::serialize(
             ) {
                 return "CAPABILITIES_ACK\nMSG="+payload.message_id+"\nID="+payload.module_id+"\nREV="+std::to_string(payload.revision)+"\nSTATUS="+payload.status+"\nEND\n";
             }
+            else if constexpr (std::is_same_v<Payload, CommandMessage>) {
+                return "COMMAND\nMSG="+payload.message_id+"\nTX="+payload.transaction_id+"\nID="+payload.module_id+"\nSESSION="+payload.session_id+"\nCAP="+payload.capability+"\nCAP_REV="+std::to_string(payload.capability_revision)+"\nPAYLOAD="+payload.payload+"\nEND\n";
+            }
+            else if constexpr (std::is_same_v<Payload, CommandAckMessage>) {
+                std::string result="COMMAND_ACK\nMSG="+payload.message_id+"\nTX="+payload.transaction_id+"\nID="+payload.module_id+"\nSESSION="+payload.session_id+"\nSTATUS="+(payload.accepted?"ACCEPTED":"REJECTED")+"\n";
+                if(!payload.code.empty()) result+="CODE="+payload.code+"\n"; if(!payload.detail.empty()) result+="DETAIL="+payload.detail+"\n"; return result+"END\n";
+            }
+            else if constexpr (std::is_same_v<Payload, CommandResultMessage>) {
+                std::string result="COMMAND_RESULT\nMSG="+payload.message_id+"\nTX="+payload.transaction_id+"\nID="+payload.module_id+"\nSESSION="+payload.session_id+"\nSTATUS="+(payload.success?"SUCCESS":"FAILURE")+"\n";
+                if(!payload.result.empty()) result+="RESULT="+payload.result+"\n"; if(!payload.code.empty()) result+="CODE="+payload.code+"\n"; if(!payload.detail.empty()) result+="DETAIL="+payload.detail+"\n"; return result+"END\n";
+            }
             else if constexpr (
                 std::is_same_v<Payload, ErrorMessage>
             ) {

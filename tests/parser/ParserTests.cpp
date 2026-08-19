@@ -230,5 +230,46 @@ int run_parser_tests() {
         expect(result.error == ParseError::TrailingData);
     }
 
+    {
+        const auto result = parser.parse(frame("COMMAND\nMSG=cmd-1\nTX=tx-1\nID=scale01\nSESSION=81A9C5D2\nCAP=tare\nCAP_REV=2\nPAYLOAD=now\nEND\n"));
+        const auto* command = result.message ? std::get_if<CommandMessage>(&result.message->payload) : nullptr;
+        expect(result.ok() && command && command->transaction_id == "tx-1" && command->capability_revision == 2);
+    }
+    {
+        const auto result = parser.parse(frame("COMMAND\nMSG=cmd-1\nTX=tx-1\nID=scale01\nSESSION=81A9C5D2\nCAP=tare\nCAP_REV=x\nPAYLOAD=now\nEND\n"));
+        expect(!result.ok() && result.error == ParseError::InvalidValue);
+    }
+    {
+        const auto result = parser.parse(frame("COMMAND_ACK\nMSG=ack-1\nTX=tx-1\nID=scale01\nSESSION=81A9C5D2\nSTATUS=ACCEPTED\nEND\n"));
+        const auto* ack = result.message ? std::get_if<CommandAckMessage>(&result.message->payload) : nullptr;
+        expect(result.ok() && ack && ack->accepted);
+    }
+    {
+        const auto result = parser.parse(frame("COMMAND_ACK\nMSG=ack-1\nTX=tx-1\nID=scale01\nSESSION=81A9C5D2\nSTATUS=REJECTED\nCODE=COMMAND_DENIED\nDETAIL=not-ready\nEND\n"));
+        const auto* ack = result.message ? std::get_if<CommandAckMessage>(&result.message->payload) : nullptr;
+        expect(result.ok() && ack && !ack->accepted && ack->code == "COMMAND_DENIED");
+    }
+    {
+        const auto result = parser.parse(frame("COMMAND_ACK\nMSG=ack-1\nTX=tx-1\nID=scale01\nSESSION=81A9C5D2\nSTATUS=REJECTED\nEND\n"));
+        expect(!result.ok() && result.error == ParseError::MissingField);
+    }
+    {
+        const auto result = parser.parse(frame("COMMAND_ACK\nMSG=ack-1\nTX=tx-1\nID=scale01\nSESSION=81A9C5D2\nSTATUS=REJECTED\nCODE=\nEND\n"));
+        expect(!result.ok() && result.error == ParseError::MalformedField);
+    }
+    {
+        const auto result = parser.parse(frame("COMMAND_ACK\nMSG=ack-1\nTX=tx-1\nID=scale01\nSESSION=81A9C5D2\nSTATUS=PENDING\nEND\n"));
+        expect(!result.ok() && result.error == ParseError::InvalidValue);
+    }
+    {
+        const auto result = parser.parse(frame("COMMAND_RESULT\nMSG=result-1\nTX=tx-1\nID=scale01\nSESSION=81A9C5D2\nSTATUS=SUCCESS\nRESULT=done\nEND\n"));
+        const auto* command_result = result.message ? std::get_if<CommandResultMessage>(&result.message->payload) : nullptr;
+        expect(result.ok() && command_result && command_result->success && command_result->result == "done");
+    }
+    {
+        const auto result = parser.parse(frame("COMMAND_RESULT\nMSG=result-1\nTX=tx-1\nID=scale01\nSESSION=81A9C5D2\nSTATUS=SUCCESS\nRESULT=done\nEXTRA=no\nEND\n"));
+        expect(!result.ok() && result.error == ParseError::UnknownField);
+    }
+
     return failures;
 }

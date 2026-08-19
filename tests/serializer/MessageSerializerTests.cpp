@@ -182,5 +182,18 @@ int run_message_serializer_tests() {
         }
     }
 
+    {
+        const Message command{CommandMessage{"cmd-1", "tx-1", "scale01", "81A9C5D2", "tare", 2, "now"}};
+        expect(serializer.serialize(command) == "COMMAND\nMSG=cmd-1\nTX=tx-1\nID=scale01\nSESSION=81A9C5D2\nCAP=tare\nCAP_REV=2\nPAYLOAD=now\nEND\n");
+    }
+    {
+        const Message acknowledgement{CommandAckMessage{"ack-1", "tx-1", "scale01", "81A9C5D2", false, "BUSY", "try later"}};
+        expect(serializer.serialize(acknowledgement) == "COMMAND_ACK\nMSG=ack-1\nTX=tx-1\nID=scale01\nSESSION=81A9C5D2\nSTATUS=REJECTED\nCODE=BUSY\nDETAIL=try later\nEND\n");
+    }
+    {
+        const Message result{CommandResultMessage{"result-1", "tx-1", "scale01", "81A9C5D2", true, "complete", "", ""}};
+        expect(serializer.serialize(result) == "COMMAND_RESULT\nMSG=result-1\nTX=tx-1\nID=scale01\nSESSION=81A9C5D2\nSTATUS=SUCCESS\nRESULT=complete\nEND\n");
+    }
+
     return failures;
 }

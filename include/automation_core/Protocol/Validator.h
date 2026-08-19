@@ -4,6 +4,7 @@
 #include "automation_core/Protocol/ValidationResult.h"
 
 #include <string>
+#include <vector>
 
 namespace automation_core {
 
@@ -13,6 +14,12 @@ public:
 
     [[nodiscard]] ValidationResult validate(
         const Message& message
+    ) const;
+
+    [[nodiscard]] ValidationResult validate_command(
+        const CommandMessage& command,
+        const std::vector<Capability>& accepted_capabilities,
+        std::uint32_t accepted_revision
     ) const;
 
 private:
