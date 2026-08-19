@@ -1213,7 +1213,11 @@ void test_process_command_failure_and_authority_loss() {
     transport.incoming.push_back({"serial:device-1", command_ack("failure-command")}); core.poll_once();
     transport.incoming.push_back({"serial:device-1", command_result("failure-command", "FAILURE")}); core.poll_once(); core.poll_once();
     const auto failed = core.find_process_run({"run-failure"});
-    expect(failed && failed->state == ProcessRunState::CommandFailed, "failed command result did not terminate process");
+    expect(failed && failed->state == ProcessRunState::Aborted, "blocking command failure did not terminate process through supervisory abort");
+    const auto command_failure_fault = core.find_supervisory_fault({"command_failure:failure-command"});
+    expect(command_failure_fault && command_failure_fault->source == SupervisoryFaultSource::CommandFailure &&
+        core.supervisory_fault_history().size() == 1 && !core.find_supervisory_fault({"process_failure:failure-command"}),
+        "command failure produced a non-deterministic or duplicate ProcessFailure fault");
     ProcessDefinition rejected{{"process-ack-rejected"}, {{{"step"}, ProcessStepKind::Command, std::chrono::milliseconds{100}, tare_command("rejected-command"), {}}}};
     expect(core.start_process(rejected, {"run-ack-rejected"}), "rejection process did not start");
     transport.incoming.push_back({"serial:device-1", command_ack("rejected-command", "REJECTED")}); core.poll_once(); core.poll_once();
@@ -1228,7 +1232,7 @@ void test_process_command_failure_and_authority_loss() {
     expect(loss_core.start_process(loss, {"run-loss"}), "authority-loss process did not start");
     now += std::chrono::milliseconds{3}; loss_core.poll_once();
     const auto lost = loss_core.find_process_run({"run-loss"});
-    expect(lost && lost->state == ProcessRunState::AuthorityLost, "authority loss did not terminate active process");
+    expect(lost && lost->state == ProcessRunState::Aborted, "blocking authority loss did not terminate active process through supervisory abort");
 }
 
 void test_process_timeouts_and_measurement_outcomes() {
@@ -1239,7 +1243,7 @@ void test_process_timeouts_and_measurement_outcomes() {
     ProcessDefinition command_timeout{{"process-command-timeout"}, {{{"step"}, ProcessStepKind::Command, std::chrono::milliseconds{10}, tare_command("timeout-command"), {}}}};
     expect(command_core.start_process(command_timeout, {"run-command-timeout"}, std::chrono::milliseconds{100}), "command timeout process did not start");
     now += std::chrono::milliseconds{10}; command_core.poll_once();
-    expect(command_core.find_process_run({"run-command-timeout"})->state == ProcessRunState::CommandTimedOut, "command timeout did not take precedence at equal step deadline");
+    expect(command_core.find_process_run({"run-command-timeout"})->state == ProcessRunState::Aborted, "blocking command timeout did not terminate through supervisory abort");
 
     FakeTransport measurement_transport; Core::TimePoint measurement_now{};
     Core measurement_core{measurement_transport, [&measurement_now] { return measurement_now; }, std::chrono::milliseconds{10000}};
@@ -1267,7 +1271,119 @@ void test_process_timeouts_and_measurement_outcomes() {
     FakeTransport unavailable_transport; Core unavailable_core{unavailable_transport};
     unavailable_transport.incoming.push_back({"serial:device-1", hello()}); unavailable_transport.incoming.push_back({"serial:device-1", orchestration_capabilities()}); unavailable_core.poll_once(); unavailable_core.poll_once();
     expect(unavailable_core.start_process(wait, {"run-unavailable"}), "unavailable process did not start");
-    expect(unavailable_core.find_process_run({"run-unavailable"})->state == ProcessRunState::MeasurementUnavailable, "unavailable measurement did not have distinct outcome");
+    expect(unavailable_core.find_process_run({"run-unavailable"})->state == ProcessRunState::Aborted, "unavailable measurement did not terminate through supervisory abort");
+}
+
+void test_supervisory_fault_lifecycle_and_process_recovery() {
+    FakeTransport transport;
+    Core core{transport};
+    SupervisoryFaultCorrelation correlation; correlation.process_id = {"fault-process"};
+    const SupervisoryFaultId id{"fault:test"};
+    expect(core.report_supervisory_fault(id, SupervisoryFaultClass::Blocking,
+        SupervisoryFaultSource::ProcessFailure, correlation), "fault report was rejected");
+    expect(core.report_supervisory_fault(id, SupervisoryFaultClass::Blocking,
+        SupervisoryFaultSource::ProcessFailure, correlation), "duplicate fault report was not idempotent");
+    expect(core.supervisory_fault_history().size() == 1, "duplicate fault report added history");
+    const auto active = core.find_supervisory_fault(id);
+    const std::size_t active_history = core.supervisory_fault_history().size();
+    const std::size_t active_traces = core.supervisory_fault_traces().size();
+    const auto active_fault_trace = active->trace;
+    expect(!core.reset_supervisory_fault(id), "reset before clear was accepted");
+    expect(core.find_supervisory_fault(id)->state == active->state && core.find_supervisory_fault(id)->trace == active_fault_trace &&
+        core.supervisory_fault_history().size() == active_history &&
+        core.supervisory_fault_traces().size() == active_traces,
+        "reset before clear mutated fault lifecycle evidence");
+    ProcessDefinition process{{"fault-process"}, {{{"wait"}, ProcessStepKind::MeasurementCondition,
+        std::chrono::milliseconds{10}, {}, {"module", "data", "value"}}}};
+    expect(!core.start_process(process, {"fault-run"}), "active blocking fault did not inhibit process");
+    expect(core.acknowledge_supervisory_fault(id), "fault acknowledgement failed");
+    expect(core.acknowledge_supervisory_fault(id), "repeated acknowledgement was not idempotent");
+    expect(core.clear_supervisory_fault(id), "fault clear failed");
+    const std::size_t cleared_history = core.supervisory_fault_history().size();
+    const std::size_t cleared_traces = core.supervisory_fault_traces().size();
+    const auto cleared_fault_trace = core.find_supervisory_fault(id)->trace;
+    expect(!core.acknowledge_supervisory_fault(id), "acknowledgement after clear was accepted");
+    expect(core.find_supervisory_fault(id)->state == SupervisoryFaultState::Cleared && core.find_supervisory_fault(id)->trace == cleared_fault_trace &&
+        core.supervisory_fault_history().size() == cleared_history &&
+        core.supervisory_fault_traces().size() == cleared_traces,
+        "acknowledgement after clear mutated fault lifecycle evidence");
+    expect(core.clear_supervisory_fault(id), "repeated clear was not idempotent");
+    expect(!core.start_process(process, {"still-faulted"}), "cleared fault bypassed required reset");
+    expect(core.reset_supervisory_fault(id), "fault reset failed");
+    expect(core.reset_supervisory_fault(id), "repeated reset was not idempotent");
+    expect(core.start_process(process, {"manual-restart"}), "explicit reset did not restore manual eligibility");
+    expect(!core.find_process_run({"automatic-restart"}), "fault recovery automatically restarted a process");
+}
+
+void test_blocking_fault_aborts_only_affected_active_run_once() {
+    FakeTransport transport; Core core{transport};
+    transport.incoming.push_back({"serial:device-1", hello()});
+    transport.incoming.push_back({"serial:device-1", command_capabilities()});
+    core.poll_once(); core.poll_once();
+    ProcessDefinition affected{{"fault-affected"}, {{{"step"}, ProcessStepKind::Command, std::chrono::milliseconds{100}, tare_command("fault-affected-tx"), {}}}};
+    ProcessDefinition unrelated{{"fault-unrelated"}, {{{"step"}, ProcessStepKind::Command, std::chrono::milliseconds{100}, tare_command("fault-unrelated-tx"), {}}}};
+    expect(core.start_process(affected, {"fault-affected-run"}), "affected active process did not start");
+    expect(core.start_process(unrelated, {"fault-unrelated-run"}), "unrelated active process did not start");
+    const std::size_t pre_fault_trace_size = core.find_process_run({"fault-affected-run"})->trace.size();
+    SupervisoryFaultCorrelation correlation; correlation.process_id = {"fault-affected"}; correlation.run_id = {"fault-affected-run"};
+    const SupervisoryFaultId id{"blocking:affected"};
+    expect(core.report_supervisory_fault(id, SupervisoryFaultClass::Blocking, SupervisoryFaultSource::ProcessFailure, correlation), "blocking report was rejected");
+    const auto terminated = core.find_process_run({"fault-affected-run"});
+    expect(terminated && terminated->state == ProcessRunState::Aborted && terminated->trace.size() == pre_fault_trace_size + 1, "blocking fault did not create exactly one affected terminal transition");
+    expect(core.find_process_run({"fault-unrelated-run"})->state == ProcessRunState::Running, "blocking fault affected unrelated work");
+    const std::size_t history = core.supervisory_fault_history().size();
+    const std::size_t trace_size = terminated->trace.size();
+    expect(core.report_supervisory_fault(id, SupervisoryFaultClass::Blocking, SupervisoryFaultSource::ProcessFailure, correlation), "duplicate blocking report was rejected");
+    expect(core.supervisory_fault_history().size() == history && core.find_process_run({"fault-affected-run"})->trace.size() == trace_size, "duplicate blocking report repeated history or terminal transition");
+}
+
+void test_generated_authority_loss_fault_is_correlated_and_idempotent() {
+    FakeTransport transport; Core::TimePoint now{};
+    Core core{transport, [&now] { return now; }, std::chrono::milliseconds{3}};
+    transport.incoming.push_back({"serial:device-1", hello()}); transport.incoming.push_back({"serial:device-1", command_capabilities()});
+    core.poll_once(); core.poll_once();
+    ProcessDefinition process{{"authority-process"}, {{{"step"}, ProcessStepKind::Command, std::chrono::milliseconds{100}, tare_command("authority-tx"), {}}}};
+    expect(core.start_process(process, {"authority-run"}), "authority process did not start");
+    now += std::chrono::milliseconds{3}; core.poll_once();
+    const auto fault = core.find_supervisory_fault({"authority_loss:scale-01"});
+    expect(fault && fault->source == SupervisoryFaultSource::ModuleAuthorityLoss && fault->classification == SupervisoryFaultClass::Blocking && fault->correlation.module_id == "scale-01", "authority-loss fault identity or classification was incorrect");
+    expect(core.find_process_run({"authority-run"})->state == ProcessRunState::Aborted, "authority-loss blocking fault did not impact process");
+    const std::size_t history = core.supervisory_fault_history().size(); core.poll_once();
+    expect(core.supervisory_fault_history().size() == history, "duplicate authority poll added fault history");
+}
+
+void test_generated_command_timeout_fault_is_correlated_and_idempotent() {
+    FakeTransport transport; Core::TimePoint now{};
+    Core core{transport, [&now] { return now; }, std::chrono::milliseconds{10000}};
+    transport.incoming.push_back({"serial:device-1", hello()}); transport.incoming.push_back({"serial:device-1", command_capabilities()});
+    core.poll_once(); core.poll_once();
+    ProcessDefinition process{{"timeout-process"}, {{{"step"}, ProcessStepKind::Command, std::chrono::milliseconds{10}, tare_command("timeout-fault-tx"), {}}}};
+    expect(core.start_process(process, {"timeout-run"}, std::chrono::milliseconds{100}), "timeout process did not start");
+    now += std::chrono::milliseconds{10}; core.poll_once();
+    const auto fault = core.find_supervisory_fault({"command_timeout:timeout-fault-tx"});
+    expect(fault && fault->source == SupervisoryFaultSource::CommandTimeout && fault->classification == SupervisoryFaultClass::Blocking &&
+        fault->correlation.module_id == "scale-01" && fault->correlation.process_id.value == "timeout-process" &&
+        fault->correlation.run_id.value == "timeout-run" && fault->correlation.command_transaction_id == "timeout-fault-tx", "command-timeout fault correlation was incorrect");
+    expect(core.find_process_run({"timeout-run"})->state == ProcessRunState::Aborted, "command-timeout fault did not impact process");
+    const std::size_t history = core.supervisory_fault_history().size(); core.poll_once();
+    expect(core.supervisory_fault_history().size() == history, "duplicate timeout poll added fault history");
+}
+
+void test_generated_fault_recovery_requires_manual_restart() {
+    FakeTransport transport; Core core{transport};
+    transport.incoming.push_back({"serial:device-1", hello()}); transport.incoming.push_back({"serial:device-1", orchestration_capabilities()});
+    transport.incoming.push_back({"serial:device-1", measurement("good", "0", 1)});
+    core.poll_once(); core.poll_once(); core.poll_once();
+    ProcessDefinition process{{"recovery-process"}, {{{"wait"}, ProcessStepKind::MeasurementCondition, std::chrono::milliseconds{100}, {}, {"scale-01", "weight", "42.5"}}}};
+    expect(core.start_process(process, {"recovery-run"}) && core.find_process_run({"recovery-run"})->state == ProcessRunState::Running, "recovery process did not become active");
+    transport.incoming.push_back({"serial:device-1", measurement("unavailable", "0", 2)}); core.poll_once();
+    const SupervisoryFaultId id{"operational_data_unavailable:recovery-run"};
+    const auto fault = core.find_supervisory_fault(id);
+    expect(fault && fault->source == SupervisoryFaultSource::OperationalDataUnavailable && fault->correlation.process_id.value == "recovery-process" && fault->correlation.run_id.value == "recovery-run", "generated unavailable-data fault lacked lookup correlation");
+    expect(core.find_process_run({"recovery-run"})->state == ProcessRunState::Aborted && core.supervisory_fault_history().size() == 1 && core.supervisory_fault_traces().size() == 1, "generated unavailable-data fault did not have one terminal correlated history event");
+    expect(core.acknowledge_supervisory_fault(id) && core.clear_supervisory_fault(id) && core.reset_supervisory_fault(id), "generated fault recovery lifecycle failed");
+    expect(!core.find_process_run({"automatic-recovery-run"}), "fault reset automatically restarted process");
+    expect(core.start_process(process, {"manual-recovery-run"}), "manual post-reset process start was not eligible");
 }
 
 void test_process_rejection_and_abort() {
@@ -1330,6 +1446,11 @@ int run_core_tests() {
     test_process_command_failure_and_authority_loss();
     test_process_timeouts_and_measurement_outcomes();
     test_process_rejection_and_abort();
+    test_supervisory_fault_lifecycle_and_process_recovery();
+    test_blocking_fault_aborts_only_affected_active_run_once();
+    test_generated_authority_loss_fault_is_correlated_and_idempotent();
+    test_generated_command_timeout_fault_is_correlated_and_idempotent();
+    test_generated_fault_recovery_requires_manual_restart();
 
     return failures;
 }

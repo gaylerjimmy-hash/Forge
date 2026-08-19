@@ -147,10 +147,111 @@ CommandRejection Core::dispatch_command(CommandMessage command, const std::chron
 
 std::optional<CommandTransaction> Core::find_command_transaction(const std::string& transaction_id) const { const auto it=command_transactions_.find(transaction_id); if(it==command_transactions_.end()) return std::nullopt; return it->second; }
 
+void Core::append_fault_trace(const SupervisoryFault& fault, const std::string& event) {
+    supervisory_fault_traces_.push_back({fault.id, fault.state, event, fault.correlation});
+    supervisory_fault_history_.push_back(fault);
+    trace("supervisory_fault_" + event, fault.id.value);
+}
+
+bool Core::fault_affects_process(const SupervisoryFault& fault, const ProcessDefinition& definition) const {
+    if (!fault.correlation.process_id.value.empty() &&
+        fault.correlation.process_id.value != definition.id.value) return false;
+    if (fault.correlation.module_id.empty()) return true;
+    for (const auto& step : definition.steps) {
+        const std::string& module = step.kind == ProcessStepKind::Command
+            ? step.command.module_id : step.condition.module_id;
+        if (module == fault.correlation.module_id) return true;
+    }
+    return false;
+}
+
+bool Core::process_is_inhibited(const ProcessDefinition& definition) const {
+    if (faulted_processes_.count(definition.id.value) != 0) return true;
+    for (const auto& entry : supervisory_faults_) {
+        const SupervisoryFault& fault = entry.second;
+        if (fault.classification == SupervisoryFaultClass::Blocking &&
+            (fault.state == SupervisoryFaultState::Active || fault.state == SupervisoryFaultState::Acknowledged ||
+             fault.state == SupervisoryFaultState::Cleared) &&
+            fault_affects_process(fault, definition)) return true;
+    }
+    return false;
+}
+
+bool Core::report_supervisory_fault(SupervisoryFaultId id, const SupervisoryFaultClass classification,
+    const SupervisoryFaultSource source, SupervisoryFaultCorrelation correlation) {
+    if (id.value.empty()) return false;
+    const std::string key = id.value;
+    const auto existing = supervisory_faults_.find(key);
+    if (existing != supervisory_faults_.end()) {
+        // A repeated report never duplicates an active lifecycle or abort action.
+        if (existing->second.state != SupervisoryFaultState::Resettable) return true;
+        existing->second.state = SupervisoryFaultState::Active;
+        existing->second.classification = classification;
+        existing->second.source = source;
+        existing->second.correlation = std::move(correlation);
+        existing->second.trace.push_back("reactivated");
+        append_fault_trace(existing->second, "reactivated");
+    } else {
+        SupervisoryFault fault{std::move(id), classification, source, SupervisoryFaultState::Active,
+            std::move(correlation), {"active"}};
+        supervisory_faults_.emplace(key, std::move(fault));
+        append_fault_trace(supervisory_faults_.at(key), "active");
+    }
+    SupervisoryFault& fault = supervisory_faults_.at(key);
+    if (fault.classification == SupervisoryFaultClass::Blocking) {
+        for (const auto& definition : process_definitions_) if (fault_affects_process(fault, definition.second)) faulted_processes_[definition.first] = true;
+        for (auto& entry : process_runs_) {
+            const auto definition = process_definitions_.find(entry.second.process_id.value);
+            if (definition != process_definitions_.end() &&
+                (entry.second.state == ProcessRunState::Pending || entry.second.state == ProcessRunState::Running) &&
+                fault_affects_process(fault, definition->second)) finish_process(entry.second, ProcessRunState::Aborted, "supervisory_fault:" + fault.id.value);
+        }
+    }
+    return true;
+}
+
+void Core::raise_generated_fault(const SupervisoryFaultSource source, const SupervisoryFaultClass classification,
+    SupervisoryFaultCorrelation correlation) {
+    std::string name;
+    switch (source) { case SupervisoryFaultSource::ModuleAuthorityLoss: name="authority_loss"; break; case SupervisoryFaultSource::CommandFailure: name="command_failure"; break; case SupervisoryFaultSource::CommandTimeout: name="command_timeout"; break; case SupervisoryFaultSource::ProcessFailure: name="process_failure"; break; case SupervisoryFaultSource::OperationalDataUnavailable: name="operational_data_unavailable"; break; }
+    const std::string key = !correlation.command_transaction_id.empty() ? correlation.command_transaction_id :
+        !correlation.run_id.value.empty() ? correlation.run_id.value : !correlation.module_id.empty() ? correlation.module_id : correlation.process_id.value;
+    // Generated reports are single attempts.  A rejection is observable, but is
+    // never retried here because recovery and retry ownership remain explicit.
+    if (!report_supervisory_fault({name + ":" + key}, classification, source, std::move(correlation))) {
+        trace("supervisory_fault_report_rejected", name + ":" + key);
+    }
+}
+
+bool Core::acknowledge_supervisory_fault(const SupervisoryFaultId& id) {
+    const auto it = supervisory_faults_.find(id.value); if (it == supervisory_faults_.end()) return false;
+    if (it->second.state == SupervisoryFaultState::Acknowledged) return true;
+    if (it->second.state != SupervisoryFaultState::Active) return false;
+    it->second.state = SupervisoryFaultState::Acknowledged; it->second.trace.push_back("acknowledged"); append_fault_trace(it->second, "acknowledged"); return true;
+}
+bool Core::clear_supervisory_fault(const SupervisoryFaultId& id) {
+    const auto it = supervisory_faults_.find(id.value); if (it == supervisory_faults_.end()) return false;
+    if (it->second.state == SupervisoryFaultState::Cleared) return true;
+    if (it->second.state != SupervisoryFaultState::Active && it->second.state != SupervisoryFaultState::Acknowledged) return false;
+    it->second.state = SupervisoryFaultState::Cleared; it->second.trace.push_back("cleared"); append_fault_trace(it->second, "cleared"); return true;
+}
+bool Core::reset_supervisory_fault(const SupervisoryFaultId& id) {
+    const auto it = supervisory_faults_.find(id.value); if (it == supervisory_faults_.end()) return false;
+    if (it->second.state == SupervisoryFaultState::Resettable) return true;
+    if (it->second.state != SupervisoryFaultState::Cleared) return false;
+    it->second.state = SupervisoryFaultState::Resettable; it->second.trace.push_back("reset"); append_fault_trace(it->second, "reset");
+    for (const auto& definition : process_definitions_) if (fault_affects_process(it->second, definition.second)) faulted_processes_.erase(definition.first);
+    return true;
+}
+std::optional<SupervisoryFault> Core::find_supervisory_fault(const SupervisoryFaultId& id) const { const auto it=supervisory_faults_.find(id.value); return it==supervisory_faults_.end()?std::nullopt:std::optional<SupervisoryFault>{it->second}; }
+const std::vector<SupervisoryFault>& Core::supervisory_fault_history() const { return supervisory_fault_history_; }
+const std::vector<SupervisoryFaultTrace>& Core::supervisory_fault_traces() const { return supervisory_fault_traces_; }
+
 bool Core::start_process(ProcessDefinition definition, ProcessRunId run_id, const std::chrono::milliseconds run_timeout) {
     if (definition.id.value.empty() || run_id.value.empty() || definition.steps.empty() || run_timeout.count() <= 0 ||
         process_runs_.count(run_id.value) != 0) return false;
     for (const auto& step : definition.steps) if (step.id.value.empty() || step.timeout.count() <= 0) return false;
+    if (process_is_inhibited(definition)) { trace("process_inhibited", definition.id.value); return false; }
     const TimePoint now = now_();
     ProcessRun run{run_id, definition.id, ProcessRunState::Pending, 0, now + run_timeout, {}, std::nullopt, {"run_pending"}};
     process_definitions_.emplace(definition.id.value, std::move(definition));
@@ -173,11 +274,27 @@ std::optional<ProcessRun> Core::find_process_run(const ProcessRunId& run_id) con
 }
 
 void Core::finish_process(ProcessRun& run, const ProcessRunState state, const std::string& reason) {
+    // A run has one terminal transition.  Generated blocking faults may be
+    // raised during the same poll cycle as a native process outcome; the first
+    // terminal outcome is retained rather than overwritten by a later path.
+    if (run.state != ProcessRunState::Pending && run.state != ProcessRunState::Running) return;
     run.state = state;
     run.trace.push_back(reason);
     std::string detail = "process=" + run.process_id.value + " run=" + run.id.value + " step=" + std::to_string(run.current_step) + " reason=" + reason;
     if (run.command_transaction_id) detail += " command=" + *run.command_transaction_id;
     trace("process_terminal", detail);
+    if (state != ProcessRunState::Succeeded && reason.rfind("supervisory_fault:", 0) != 0 &&
+        state != ProcessRunState::Aborted) {
+        SupervisoryFaultCorrelation correlation;
+        correlation.process_id = run.process_id;
+        correlation.run_id = run.id;
+        correlation.command_transaction_id = run.command_transaction_id.value_or("");
+        if (run.command_transaction_id) {
+            const auto command = command_transactions_.find(*run.command_transaction_id);
+            if (command != command_transactions_.end()) correlation.module_id = command->second.command.module_id;
+        }
+        raise_generated_fault(SupervisoryFaultSource::ProcessFailure, SupervisoryFaultClass::Blocking, std::move(correlation));
+    }
 }
 
 void Core::advance_processes(const TimePoint now) {
@@ -233,6 +350,8 @@ void Core::advance_processes(const TimePoint now) {
             }
             if (measurement == module->measurements.end() || !measurement->second.operational ||
                 measurement->second.effective_quality == MeasurementQuality::Unavailable) {
+                raise_generated_fault(SupervisoryFaultSource::OperationalDataUnavailable, SupervisoryFaultClass::Blocking,
+                    {step.condition.module_id, run.process_id, run.id, {}, step.condition.capability});
                 finish_process(run, ProcessRunState::MeasurementUnavailable, "measurement_unavailable"); continue;
             }
             if (measurement->second.effective_quality == MeasurementQuality::Good &&
@@ -270,9 +389,21 @@ bool Core::poll_once() {
         trace("measurement_unavailable", module_id);
         for (auto& entry : command_transactions_) if (entry.second.command.module_id==module_id && (entry.second.state==CommandTransactionState::Dispatched || entry.second.state==CommandTransactionState::Acknowledged)) { entry.second.state=CommandTransactionState::AuthorityLost; entry.second.rejection=CommandRejection::AuthorityLoss; entry.second.trace.push_back("authority_lost"); trace("command_authority_lost",entry.first); }
     }
-    for (auto& entry : command_transactions_) if ((entry.second.state==CommandTransactionState::Dispatched || entry.second.state==CommandTransactionState::Acknowledged) && now >= entry.second.deadline) { entry.second.state=CommandTransactionState::TimedOut; entry.second.rejection=CommandRejection::Timeout; entry.second.trace.push_back("timed_out"); trace("command_timeout",entry.first); }
+    std::vector<std::string> timed_out_transactions;
+    for (auto& entry : command_transactions_) if ((entry.second.state==CommandTransactionState::Dispatched || entry.second.state==CommandTransactionState::Acknowledged) && now >= entry.second.deadline) { entry.second.state=CommandTransactionState::TimedOut; entry.second.rejection=CommandRejection::Timeout; entry.second.trace.push_back("timed_out"); trace("command_timeout",entry.first); timed_out_transactions.push_back(entry.first); }
     const auto stale_measurements=registry_.expire_measurements(measurement_timeout_,now);
     for(const auto& name:stale_measurements)trace("measurement_stale",name);
+    // Generated blocking faults are applied before normal advancement.  This
+    // gives the supervisory abort the sole terminal transition for that poll.
+    for (const auto& module_id : expired_modules)
+        raise_generated_fault(SupervisoryFaultSource::ModuleAuthorityLoss, SupervisoryFaultClass::Blocking, {module_id});
+    for (const auto& transaction_id : timed_out_transactions) {
+        const auto transaction = command_transactions_.find(transaction_id);
+        if (transaction == command_transactions_.end()) continue;
+        SupervisoryFaultCorrelation correlation{transaction->second.command.module_id, {}, {}, transaction_id};
+        for (const auto& run : process_runs_) if (run.second.command_transaction_id && *run.second.command_transaction_id == transaction_id) { correlation.process_id = run.second.process_id; correlation.run_id = run.second.id; break; }
+        raise_generated_fault(SupervisoryFaultSource::CommandTimeout, SupervisoryFaultClass::Blocking, std::move(correlation));
+    }
     advance_processes(now);
 
     const auto packet = transport_.receive();
@@ -405,6 +536,7 @@ bool Core::poll_once() {
         const auto it=command_transactions_.find(response.transaction_id);
         if (it==command_transactions_.end() || it->second.connection_id!=connection_id || it->second.command.module_id!=response.module_id || it->second.command.session_id!=response.session_id) { trace("command_correlation_rejected",response.transaction_id); return true; }
         auto& transaction=it->second;
+        bool result_failed = false;
         if constexpr (std::is_same_v<std::decay_t<decltype(response)>, CommandAckMessage>) {
             if (transaction.state!=CommandTransactionState::Dispatched) { trace("command_lifecycle_rejected",response.transaction_id); return true; }
             if (response.accepted) { transaction.state=CommandTransactionState::Acknowledged; transaction.trace.push_back("acknowledged"); trace("command_acknowledged",response.transaction_id); }
@@ -412,6 +544,14 @@ bool Core::poll_once() {
         } else {
             if (transaction.state!=CommandTransactionState::Acknowledged) { trace("command_lifecycle_rejected",response.transaction_id); return true; }
             transaction.state=response.success?CommandTransactionState::Succeeded:CommandTransactionState::Failed; transaction.rejection=response.success?CommandRejection::None:CommandRejection::Lifecycle; transaction.trace.push_back(response.success?"result_success":"result_failure"); trace("command_result",response.transaction_id);
+            result_failed = !response.success;
+        }
+        if (result_failed) {
+            SupervisoryFaultCorrelation correlation{transaction.command.module_id, {}, {}, response.transaction_id};
+            for (const auto& run : process_runs_) if (run.second.command_transaction_id && *run.second.command_transaction_id == response.transaction_id) { correlation.process_id = run.second.process_id; correlation.run_id = run.second.id; break; }
+            // Apply the generated blocking outcome before normal advancement so
+            // it cannot be followed by a second process terminal transition.
+            raise_generated_fault(SupervisoryFaultSource::CommandFailure, SupervisoryFaultClass::Blocking, std::move(correlation));
         }
         advance_processes(now);
         return true;

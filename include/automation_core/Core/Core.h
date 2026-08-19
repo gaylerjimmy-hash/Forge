@@ -24,6 +24,34 @@ namespace automation_core {
 
 enum class CommandTransactionState { Dispatched, Acknowledged, Rejected, Succeeded, Failed, TimedOut, AuthorityLost };
 enum class CommandRejection { None, Protocol, Capability, Routing, Correlation, Lifecycle, Timeout, AuthorityLoss };
+
+// Supervisory faults are Core coordination records, not module hardware safety
+// actions. Their identities are stable within the Core lifetime.
+struct SupervisoryFaultId { std::string value; };
+enum class SupervisoryFaultClass { Advisory, Blocking };
+enum class SupervisoryFaultSource { ModuleAuthorityLoss, CommandFailure, CommandTimeout, ProcessFailure, OperationalDataUnavailable };
+enum class SupervisoryFaultState { Active, Acknowledged, Cleared, Resettable };
+struct SupervisoryFaultCorrelation {
+    std::string module_id;
+    ProcessId process_id;
+    ProcessRunId run_id;
+    std::string command_transaction_id;
+    std::string capability;
+};
+struct SupervisoryFaultTrace {
+    SupervisoryFaultId fault_id;
+    SupervisoryFaultState state{SupervisoryFaultState::Active};
+    std::string event;
+    SupervisoryFaultCorrelation correlation;
+};
+struct SupervisoryFault {
+    SupervisoryFaultId id;
+    SupervisoryFaultClass classification{SupervisoryFaultClass::Advisory};
+    SupervisoryFaultSource source{SupervisoryFaultSource::ProcessFailure};
+    SupervisoryFaultState state{SupervisoryFaultState::Active};
+    SupervisoryFaultCorrelation correlation;
+    std::vector<std::string> trace;
+};
 struct CommandTransaction {
     CommandMessage command;
     std::string connection_id;
@@ -69,6 +97,18 @@ public:
     [[nodiscard]] bool abort_process(const ProcessRunId& run_id);
     [[nodiscard]] std::optional<ProcessRun> find_process_run(const ProcessRunId& run_id) const;
 
+    // Reporting and lifecycle requests are deterministic: repeated reporting of
+    // an active identity and repeated permitted operations are idempotent.
+    [[nodiscard]] bool report_supervisory_fault(SupervisoryFaultId id,
+        SupervisoryFaultClass classification, SupervisoryFaultSource source,
+        SupervisoryFaultCorrelation correlation = {});
+    [[nodiscard]] bool acknowledge_supervisory_fault(const SupervisoryFaultId& id);
+    [[nodiscard]] bool clear_supervisory_fault(const SupervisoryFaultId& id);
+    [[nodiscard]] bool reset_supervisory_fault(const SupervisoryFaultId& id);
+    [[nodiscard]] std::optional<SupervisoryFault> find_supervisory_fault(const SupervisoryFaultId& id) const;
+    [[nodiscard]] const std::vector<SupervisoryFault>& supervisory_fault_history() const;
+    [[nodiscard]] const std::vector<SupervisoryFaultTrace>& supervisory_fault_traces() const;
+
 private:
     Core(
         ITransport& transport,
@@ -83,6 +123,11 @@ private:
     ) const;
     void advance_processes(TimePoint now);
     void finish_process(ProcessRun& run, ProcessRunState state, const std::string& reason);
+    bool fault_affects_process(const SupervisoryFault& fault, const ProcessDefinition& definition) const;
+    bool process_is_inhibited(const ProcessDefinition& definition) const;
+    void append_fault_trace(const SupervisoryFault& fault, const std::string& event);
+    void raise_generated_fault(SupervisoryFaultSource source, SupervisoryFaultClass classification,
+        SupervisoryFaultCorrelation correlation);
 
     ITransport& transport_;
     std::ostream* trace_output_;
@@ -101,6 +146,12 @@ private:
     std::unordered_map<std::string, CommandTransaction> command_transactions_;
     std::unordered_map<std::string, ProcessDefinition> process_definitions_;
     std::unordered_map<std::string, ProcessRun> process_runs_;
+    std::unordered_map<std::string, SupervisoryFault> supervisory_faults_;
+    // Append-only diagnostic snapshots and lifecycle event correlations are
+    // intentionally in-memory only.
+    std::vector<SupervisoryFault> supervisory_fault_history_;
+    std::vector<SupervisoryFaultTrace> supervisory_fault_traces_;
+    std::unordered_map<std::string, bool> faulted_processes_;
 };
 
 } // namespace automation_core
