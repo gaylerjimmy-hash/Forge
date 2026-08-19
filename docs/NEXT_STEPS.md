@@ -72,30 +72,51 @@ Complete and covered by protocol, validator, serializer, and Core tests:
 
 ## Milestone 6 — Process Orchestration
 
+Complete and covered by Core-level state-machine, failure-path, timeout,
+abort, and end-to-end tests:
+
+- typed process, run, and step identities
+- explicit non-blocking Core-owned process state machine
+- ordered command and measurement-condition steps
+- command dispatch through the accepted Milestone 5 transaction boundary
+- operationally-current measurement-condition evaluation
+- monotonic process and step deadlines
+- deterministic command rejection, failure, timeout, and authority-loss outcomes
+- distinct stale and unavailable measurement outcomes
+- explicit process abort
+- correlated process, run, step, and command transaction tracing
+
+## Milestone 7 — Supervisory Fault Handling and Recovery
+
 Next implementation milestone:
 
-1. Define typed process, run, and step identities.
-2. Add an explicit non-blocking process execution state machine.
-3. Define ordered command steps and measurement-condition wait steps.
-4. Keep process coordination in Core-side orchestration; modules continue to
-   own hardware and local protective behavior.
-5. Dispatch command steps only through the accepted Milestone 5 command
-   transaction boundary.
-6. Evaluate measurement conditions only against operationally current accepted
-   measurement state.
-7. Use monotonic time for step and run deadlines; do not use blocking delays.
-8. Handle command rejection, failure, timeout, authority loss, stale or
-   unavailable measurements, and explicit abort deterministically.
-9. Correlate process, step, and command transaction traces.
-10. Add focused state-machine, failure-path, timeout, abort, and end-to-end
-    tests and run a clean build and full CTest suite.
+1. Define typed supervisory fault identities, classes, sources, and lifecycle
+   states.
+2. Add an explicit Core-owned fault state machine for active, acknowledged,
+   cleared, and resettable faults.
+3. Raise deterministic supervisory faults from relevant module authority loss,
+   command failure/timeout, process failure, and unavailable operational data.
+4. Keep module-local protective action independent; Core supervisory faults
+   must not replace hardware or module safety behavior.
+5. Inhibit starting affected process work while blocking faults are active.
+6. Abort or deterministically terminate affected active process work when a
+   configured blocking fault becomes active.
+7. Require explicit recovery/reset action before previously faulted process
+   work may restart; never auto-restart a process.
+8. Preserve fault history and correlated traces in memory for diagnostics
+   without adding persistence.
+9. Make duplicate fault reports, repeated acknowledgement, clear, and reset
+   operations deterministic and idempotent where appropriate.
+10. Add focused fault-lifecycle, process-inhibit, abort, recovery, authority,
+    timeout, duplicate-event, and end-to-end tests.
 
-Milestone 6 does not add automatic retry, persistence, distributed execution,
-GUI/HMI behavior, or hardware safety logic. Retry or recovery policy must be
-introduced later as explicit state-machine behavior rather than hidden loops.
+Milestone 7 is supervisory fault and recovery behavior only. It does not claim
+functional-safety certification and does not add hardware safety logic,
+automatic process restart, persistence, distributed execution, or GUI/HMI
+behavior.
 
 ## Later Work
 
 Real serial I/O, persistence, GUI/HMI work, MQTT, TCP, ESP32 integration,
-and the broader safety and recovery model remain outside Milestones 1 through
-6.
+functional-safety implementation/certification, and broader automated recovery
+policy remain outside Milestones 1 through 7.
