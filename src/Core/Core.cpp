@@ -147,6 +147,102 @@ CommandRejection Core::dispatch_command(CommandMessage command, const std::chron
 
 std::optional<CommandTransaction> Core::find_command_transaction(const std::string& transaction_id) const { const auto it=command_transactions_.find(transaction_id); if(it==command_transactions_.end()) return std::nullopt; return it->second; }
 
+bool Core::start_process(ProcessDefinition definition, ProcessRunId run_id, const std::chrono::milliseconds run_timeout) {
+    if (definition.id.value.empty() || run_id.value.empty() || definition.steps.empty() || run_timeout.count() <= 0 ||
+        process_runs_.count(run_id.value) != 0) return false;
+    for (const auto& step : definition.steps) if (step.id.value.empty() || step.timeout.count() <= 0) return false;
+    const TimePoint now = now_();
+    ProcessRun run{run_id, definition.id, ProcessRunState::Pending, 0, now + run_timeout, {}, std::nullopt, {"run_pending"}};
+    process_definitions_.emplace(definition.id.value, std::move(definition));
+    process_runs_.emplace(run_id.value, std::move(run));
+    trace("process_started", "process=" + process_runs_.at(run_id.value).process_id.value + " run=" + run_id.value);
+    advance_processes(now);
+    return true;
+}
+
+bool Core::abort_process(const ProcessRunId& run_id) {
+    const auto it = process_runs_.find(run_id.value);
+    if (it == process_runs_.end() || it->second.state != ProcessRunState::Running) return false;
+    finish_process(it->second, ProcessRunState::Aborted, "explicit_abort");
+    return true;
+}
+
+std::optional<ProcessRun> Core::find_process_run(const ProcessRunId& run_id) const {
+    const auto it = process_runs_.find(run_id.value);
+    return it == process_runs_.end() ? std::nullopt : std::optional<ProcessRun>{it->second};
+}
+
+void Core::finish_process(ProcessRun& run, const ProcessRunState state, const std::string& reason) {
+    run.state = state;
+    run.trace.push_back(reason);
+    std::string detail = "process=" + run.process_id.value + " run=" + run.id.value + " step=" + std::to_string(run.current_step) + " reason=" + reason;
+    if (run.command_transaction_id) detail += " command=" + *run.command_transaction_id;
+    trace("process_terminal", detail);
+}
+
+void Core::advance_processes(const TimePoint now) {
+    for (auto& item : process_runs_) {
+        ProcessRun& run = item.second;
+        if (run.state != ProcessRunState::Pending && run.state != ProcessRunState::Running) continue;
+        const auto definition_it = process_definitions_.find(run.process_id.value);
+        if (definition_it == process_definitions_.end()) { finish_process(run, ProcessRunState::Aborted, "definition_unavailable"); continue; }
+        const ProcessDefinition& definition = definition_it->second;
+        if (now >= run.deadline) { finish_process(run, ProcessRunState::RunTimedOut, "run_timeout"); continue; }
+        if (run.state == ProcessRunState::Pending) { run.state = ProcessRunState::Running; run.trace.push_back("run_running"); }
+        if (run.current_step >= definition.steps.size()) { finish_process(run, ProcessRunState::Succeeded, "completed"); continue; }
+        const ProcessStep& step = definition.steps[run.current_step];
+        if (run.step_deadline.time_since_epoch().count() == 0) {
+            run.step_deadline = now + step.timeout;
+            run.trace.push_back("step_started:" + step.id.value);
+            trace("process_step_started", "process=" + run.process_id.value + " run=" + run.id.value + " step=" + step.id.value);
+        }
+        // Command transaction expiry is established by the Core-owned command
+        // boundary before process advancement.  At an equal deadline it is the
+        // more specific command outcome, rather than a generic step timeout.
+        if (step.kind == ProcessStepKind::Command && run.command_transaction_id) {
+            const auto command = find_command_transaction(*run.command_transaction_id);
+            if (command && command->state == CommandTransactionState::TimedOut) {
+                finish_process(run, ProcessRunState::CommandTimedOut, "command_timeout");
+                continue;
+            }
+        }
+        if (now >= run.step_deadline) { finish_process(run, ProcessRunState::StepTimedOut, "step_timeout"); continue; }
+        if (step.kind == ProcessStepKind::Command) {
+            if (!run.command_transaction_id) {
+                run.command_transaction_id = step.command.transaction_id;
+                const CommandRejection rejection = dispatch_command(step.command, step.timeout);
+                if (rejection != CommandRejection::None) { finish_process(run, ProcessRunState::CommandRejected, "command_rejected"); continue; }
+                run.trace.push_back("command_dispatched:" + step.command.transaction_id);
+                trace("process_command_dispatched", "process=" + run.process_id.value + " run=" + run.id.value + " step=" + step.id.value + " command=" + step.command.transaction_id);
+            }
+            const auto command = find_command_transaction(*run.command_transaction_id);
+            if (!command) { finish_process(run, ProcessRunState::CommandRejected, "command_missing"); continue; }
+            if (command->state == CommandTransactionState::Succeeded) {
+                ++run.current_step; run.step_deadline = {}; run.command_transaction_id.reset(); run.trace.push_back("step_succeeded:" + step.id.value);
+            } else if (command->state == CommandTransactionState::Rejected) finish_process(run, ProcessRunState::CommandRejected, "command_rejected");
+            else if (command->state == CommandTransactionState::Failed) finish_process(run, ProcessRunState::CommandFailed, "command_failed");
+            else if (command->state == CommandTransactionState::TimedOut) finish_process(run, ProcessRunState::CommandTimedOut, "command_timeout");
+            else if (command->state == CommandTransactionState::AuthorityLost) finish_process(run, ProcessRunState::AuthorityLost, "authority_lost");
+        } else {
+            const auto module = registry_.find(step.condition.module_id);
+            if (!module || module->status != ModuleStatus::Active) { finish_process(run, ProcessRunState::AuthorityLost, "authority_lost"); continue; }
+            const auto measurement = module->measurements.find(step.condition.capability);
+            if (measurement != module->measurements.end() &&
+                measurement->second.effective_quality == MeasurementQuality::Stale) {
+                finish_process(run, ProcessRunState::MeasurementStale, "measurement_stale"); continue;
+            }
+            if (measurement == module->measurements.end() || !measurement->second.operational ||
+                measurement->second.effective_quality == MeasurementQuality::Unavailable) {
+                finish_process(run, ProcessRunState::MeasurementUnavailable, "measurement_unavailable"); continue;
+            }
+            if (measurement->second.effective_quality == MeasurementQuality::Good &&
+                measurement->second.value_text == step.condition.expected_value) {
+                ++run.current_step; run.step_deadline = {}; run.trace.push_back("condition_satisfied:" + step.id.value);
+            }
+        }
+    }
+}
+
 void Core::trace(
     const std::string& event,
     const std::string& detail
@@ -177,6 +273,7 @@ bool Core::poll_once() {
     for (auto& entry : command_transactions_) if ((entry.second.state==CommandTransactionState::Dispatched || entry.second.state==CommandTransactionState::Acknowledged) && now >= entry.second.deadline) { entry.second.state=CommandTransactionState::TimedOut; entry.second.rejection=CommandRejection::Timeout; entry.second.trace.push_back("timed_out"); trace("command_timeout",entry.first); }
     const auto stale_measurements=registry_.expire_measurements(measurement_timeout_,now);
     for(const auto& name:stale_measurements)trace("measurement_stale",name);
+    advance_processes(now);
 
     const auto packet = transport_.receive();
 
@@ -316,6 +413,7 @@ bool Core::poll_once() {
             if (transaction.state!=CommandTransactionState::Acknowledged) { trace("command_lifecycle_rejected",response.transaction_id); return true; }
             transaction.state=response.success?CommandTransactionState::Succeeded:CommandTransactionState::Failed; transaction.rejection=response.success?CommandRejection::None:CommandRejection::Lifecycle; transaction.trace.push_back(response.success?"result_success":"result_failure"); trace("command_result",response.transaction_id);
         }
+        advance_processes(now);
         return true;
     };
     if (const auto* ack=std::get_if<CommandAckMessage>(&parse_result.message->payload)) return handle_command_response(*ack,true);
@@ -358,6 +456,7 @@ bool Core::poll_once() {
         }
 
         trace("route_completed", route_result.detail + "; no response");
+        advance_processes(now);
         return true;
     }
 

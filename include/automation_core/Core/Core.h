@@ -1,6 +1,7 @@
 #pragma once
 
 #include "automation_core/Connection/ConnectionManager.h"
+#include "automation_core/Process/Process.h"
 #include "automation_core/Frame/FrameAssembler.h"
 #include "automation_core/Protocol/MessageSerializer.h"
 #include "automation_core/Protocol/Parser.h"
@@ -61,6 +62,13 @@ public:
     [[nodiscard]] CommandRejection dispatch_command(CommandMessage command, std::chrono::milliseconds timeout = std::chrono::milliseconds{5000});
     [[nodiscard]] std::optional<CommandTransaction> find_command_transaction(const std::string& transaction_id) const;
 
+    // Starts a Core-owned, non-blocking run. Calls to poll_once advance it;
+    // this API never waits for a module or measurement.
+    [[nodiscard]] bool start_process(ProcessDefinition definition, ProcessRunId run_id,
+        std::chrono::milliseconds run_timeout = std::chrono::milliseconds{30000});
+    [[nodiscard]] bool abort_process(const ProcessRunId& run_id);
+    [[nodiscard]] std::optional<ProcessRun> find_process_run(const ProcessRunId& run_id) const;
+
 private:
     Core(
         ITransport& transport,
@@ -73,6 +81,8 @@ private:
         const std::string& event,
         const std::string& detail
     ) const;
+    void advance_processes(TimePoint now);
+    void finish_process(ProcessRun& run, ProcessRunState state, const std::string& reason);
 
     ITransport& transport_;
     std::ostream* trace_output_;
@@ -89,6 +99,8 @@ private:
     MessageRouter router_;
     std::unordered_map<std::string, std::string> transport_connections_;
     std::unordered_map<std::string, CommandTransaction> command_transactions_;
+    std::unordered_map<std::string, ProcessDefinition> process_definitions_;
+    std::unordered_map<std::string, ProcessRun> process_runs_;
 };
 
 } // namespace automation_core

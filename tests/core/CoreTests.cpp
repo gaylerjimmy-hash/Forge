@@ -99,6 +99,10 @@ std::string command_capabilities() {
     return "CAPABILITIES\nMSG=command-cap-1\nID=scale-01\nSESSION=81A9C5D2\nREV=2\nCOUNT=1\nITEM.0.NAME=tare\nITEM.0.TYPE=command\nITEM.0.ACCESS=command\nEND\n";
 }
 
+std::string orchestration_capabilities() {
+    return "CAPABILITIES\nMSG=orchestration-cap-1\nID=scale-01\nSESSION=81A9C5D2\nREV=2\nCOUNT=2\nITEM.0.NAME=tare\nITEM.0.TYPE=command\nITEM.0.ACCESS=command\nITEM.1.NAME=weight\nITEM.1.TYPE=measurement\nITEM.1.DATA_TYPE=float\nITEM.1.ACCESS=read\nEND\n";
+}
+
 std::string command_ack(const std::string& transaction_id, const std::string& status = "ACCEPTED") {
     const std::string rejection_code = status == "REJECTED" ? "CODE=COMMAND_DENIED\n" : "";
     return "COMMAND_ACK\nMSG=ack-" + transaction_id + "\nTX=" + transaction_id + "\nID=scale-01\nSESSION=81A9C5D2\nSTATUS=" + status + "\n" + rejection_code + "END\n";
@@ -112,8 +116,8 @@ CommandMessage tare_command(const std::string& transaction_id) {
     return {"command-" + transaction_id, transaction_id, "scale-01", "81A9C5D2", "tare", 2, "now"};
 }
 
-std::string measurement(const std::string& quality="good") {
-    return "MEASUREMENT\nMSG=measure-1\nID=scale-01\nSESSION=81A9C5D2\nCAP=weight\nSEQ=1\nVALUE=42.5\nQUALITY="+quality+"\nEND\n";
+std::string measurement(const std::string& quality="good", const std::string& value="42.5", const std::uint32_t sequence=1) {
+    return "MEASUREMENT\nMSG=measure-" + std::to_string(sequence) + "\nID=scale-01\nSESSION=81A9C5D2\nCAP=weight\nSEQ=" + std::to_string(sequence) + "\nVALUE=" + value + "\nQUALITY="+quality+"\nEND\n";
 }
 
 void test_no_packet_is_a_no_op() {
@@ -1167,6 +1171,123 @@ void test_command_timeout_and_authority_loss() {
     expect(lost && lost->state == CommandTransactionState::AuthorityLost && lost->rejection == CommandRejection::AuthorityLoss, "authority loss did not invalidate transaction");
 }
 
+void test_process_ordered_end_to_end_and_correlation() {
+    FakeTransport transport; std::ostringstream trace; Core core{transport, trace};
+    transport.incoming.push_back({"serial:device-1", hello()});
+    transport.incoming.push_back({"serial:device-1", orchestration_capabilities()});
+    transport.incoming.push_back({"serial:device-1", measurement("good", "0", 1)});
+    core.poll_once(); core.poll_once(); core.poll_once();
+    ProcessDefinition definition{{"process-ordered"}, {
+        {{"command-step"}, ProcessStepKind::Command, std::chrono::milliseconds{100}, tare_command("process-command"), {}},
+        {{"wait-step"}, ProcessStepKind::MeasurementCondition, std::chrono::milliseconds{100}, {}, {"scale-01", "weight", "42.5"}}
+    }};
+    expect(core.start_process(definition, {"run-ordered"}), "ordered process did not start");
+    auto run = core.find_process_run({"run-ordered"});
+    expect(run && run->current_step == 0 && transport.sent.size() == 3, "later step started before command dispatch");
+    core.poll_once();
+    run = core.find_process_run({"run-ordered"});
+    expect(run && run->current_step == 0, "later step advanced without command completion");
+    transport.incoming.push_back({"serial:device-1", command_ack("process-command")}); core.poll_once();
+    transport.incoming.push_back({"serial:device-1", command_result("process-command")}); core.poll_once();
+    core.poll_once();
+    run = core.find_process_run({"run-ordered"});
+    expect(run && run->state == ProcessRunState::Running && run->current_step == 1, "successful command did not advance exactly one ordered step");
+    core.poll_once();
+    run = core.find_process_run({"run-ordered"});
+    expect(run && run->current_step == 1, "measurement step advanced before condition became valid");
+    transport.incoming.push_back({"serial:device-1", measurement("good", "42.5", 2)}); core.poll_once();
+    core.poll_once(); core.poll_once(); core.poll_once();
+    run = core.find_process_run({"run-ordered"});
+    expect(run && run->state == ProcessRunState::Succeeded, "final valid measurement step did not succeed process");
+    const std::string output = trace.str();
+    expect(output.find("process=process-ordered run=run-ordered step=command-step command=process-command") != std::string::npos,
+           "process, run, step, and command correlation was not traced");
+}
+
+void test_process_command_failure_and_authority_loss() {
+    FakeTransport transport; Core core{transport};
+    transport.incoming.push_back({"serial:device-1", hello()}); transport.incoming.push_back({"serial:device-1", command_capabilities()});
+    core.poll_once(); core.poll_once();
+    ProcessDefinition failure{{"process-failure"}, {{{"step"}, ProcessStepKind::Command, std::chrono::milliseconds{100}, tare_command("failure-command"), {}}}};
+    expect(core.start_process(failure, {"run-failure"}), "failure process did not start");
+    transport.incoming.push_back({"serial:device-1", command_ack("failure-command")}); core.poll_once();
+    transport.incoming.push_back({"serial:device-1", command_result("failure-command", "FAILURE")}); core.poll_once(); core.poll_once();
+    const auto failed = core.find_process_run({"run-failure"});
+    expect(failed && failed->state == ProcessRunState::CommandFailed, "failed command result did not terminate process");
+    ProcessDefinition rejected{{"process-ack-rejected"}, {{{"step"}, ProcessStepKind::Command, std::chrono::milliseconds{100}, tare_command("rejected-command"), {}}}};
+    expect(core.start_process(rejected, {"run-ack-rejected"}), "rejection process did not start");
+    transport.incoming.push_back({"serial:device-1", command_ack("rejected-command", "REJECTED")}); core.poll_once(); core.poll_once();
+    const auto rejected_run = core.find_process_run({"run-ack-rejected"});
+    expect(rejected_run && rejected_run->state == ProcessRunState::CommandRejected, "rejected command ACK did not terminate process");
+
+    FakeTransport loss_transport; Core::TimePoint now{};
+    Core loss_core{loss_transport, [&now] { return now; }, std::chrono::milliseconds{3}};
+    loss_transport.incoming.push_back({"serial:device-1", hello()}); loss_transport.incoming.push_back({"serial:device-1", command_capabilities()});
+    loss_core.poll_once(); loss_core.poll_once();
+    ProcessDefinition loss{{"process-loss"}, {{{"step"}, ProcessStepKind::Command, std::chrono::milliseconds{100}, tare_command("loss-command"), {}}}};
+    expect(loss_core.start_process(loss, {"run-loss"}), "authority-loss process did not start");
+    now += std::chrono::milliseconds{3}; loss_core.poll_once();
+    const auto lost = loss_core.find_process_run({"run-loss"});
+    expect(lost && lost->state == ProcessRunState::AuthorityLost, "authority loss did not terminate active process");
+}
+
+void test_process_timeouts_and_measurement_outcomes() {
+    FakeTransport command_transport; Core::TimePoint now{};
+    Core command_core{command_transport, [&now] { return now; }, std::chrono::milliseconds{10000}};
+    command_transport.incoming.push_back({"serial:device-1", hello()}); command_transport.incoming.push_back({"serial:device-1", command_capabilities()});
+    command_core.poll_once(); command_core.poll_once();
+    ProcessDefinition command_timeout{{"process-command-timeout"}, {{{"step"}, ProcessStepKind::Command, std::chrono::milliseconds{10}, tare_command("timeout-command"), {}}}};
+    expect(command_core.start_process(command_timeout, {"run-command-timeout"}, std::chrono::milliseconds{100}), "command timeout process did not start");
+    now += std::chrono::milliseconds{10}; command_core.poll_once();
+    expect(command_core.find_process_run({"run-command-timeout"})->state == ProcessRunState::CommandTimedOut, "command timeout did not take precedence at equal step deadline");
+
+    FakeTransport measurement_transport; Core::TimePoint measurement_now{};
+    Core measurement_core{measurement_transport, [&measurement_now] { return measurement_now; }, std::chrono::milliseconds{10000}};
+    measurement_transport.incoming.push_back({"serial:device-1", orchestration_capabilities()});
+    measurement_transport.incoming.push_front({"serial:device-1", hello()});
+    measurement_transport.incoming.push_back({"serial:device-1", measurement("good", "0", 1)});
+    measurement_core.poll_once(); measurement_core.poll_once(); measurement_core.poll_once();
+    ProcessDefinition wait{{"process-step-timeout"}, {{{"wait"}, ProcessStepKind::MeasurementCondition, std::chrono::milliseconds{10}, {}, {"scale-01", "weight", "42.5"}}}};
+    expect(measurement_core.start_process(wait, {"run-step-timeout"}, std::chrono::milliseconds{100}), "step timeout process did not start");
+    measurement_now += std::chrono::milliseconds{10}; measurement_core.poll_once();
+    expect(measurement_core.find_process_run({"run-step-timeout"})->state == ProcessRunState::StepTimedOut, "step timeout was not reachable without delay");
+    ProcessDefinition run_wait{{"process-run-timeout"}, {{{"wait"}, ProcessStepKind::MeasurementCondition, std::chrono::milliseconds{100}, {}, {"scale-01", "weight", "42.5"}}}};
+    expect(measurement_core.start_process(run_wait, {"run-run-timeout"}, std::chrono::milliseconds{10}), "run timeout process did not start");
+    measurement_now += std::chrono::milliseconds{10}; measurement_core.poll_once();
+    expect(measurement_core.find_process_run({"run-run-timeout"})->state == ProcessRunState::RunTimedOut, "run timeout was not reachable without delay");
+
+    FakeTransport stale_transport; Core::TimePoint stale_now{};
+    Core stale_core{stale_transport, [&stale_now] { return stale_now; }, std::chrono::milliseconds{10000}};
+    stale_transport.incoming.push_back({"serial:device-1", hello()}); stale_transport.incoming.push_back({"serial:device-1", orchestration_capabilities()}); stale_transport.incoming.push_back({"serial:device-1", measurement()});
+    stale_core.poll_once(); stale_core.poll_once(); stale_core.poll_once();
+    ProcessDefinition stale_wait{{"process-stale"}, {{{"wait"}, ProcessStepKind::MeasurementCondition, std::chrono::milliseconds{6000}, {}, {"scale-01", "weight", "0"}}}};
+    expect(stale_core.start_process(stale_wait, {"run-stale"}), "stale process did not start");
+    stale_now += std::chrono::milliseconds{5000}; stale_core.poll_once();
+    expect(stale_core.find_process_run({"run-stale"})->state == ProcessRunState::MeasurementStale, "stale measurement satisfied or became unavailable");
+    FakeTransport unavailable_transport; Core unavailable_core{unavailable_transport};
+    unavailable_transport.incoming.push_back({"serial:device-1", hello()}); unavailable_transport.incoming.push_back({"serial:device-1", orchestration_capabilities()}); unavailable_core.poll_once(); unavailable_core.poll_once();
+    expect(unavailable_core.start_process(wait, {"run-unavailable"}), "unavailable process did not start");
+    expect(unavailable_core.find_process_run({"run-unavailable"})->state == ProcessRunState::MeasurementUnavailable, "unavailable measurement did not have distinct outcome");
+}
+
+void test_process_rejection_and_abort() {
+    FakeTransport transport;
+    Core core{transport};
+    ProcessDefinition rejected{{"process-reject"}, {{ {"step-1"}, ProcessStepKind::Command, std::chrono::milliseconds{10}, tare_command("process-bad"), {} }}};
+    expect(core.start_process(rejected, {"run-reject"}), "process run did not start");
+    const auto rejected_run = core.find_process_run({"run-reject"});
+    expect(rejected_run && rejected_run->state == ProcessRunState::CommandRejected, "command rejection did not terminate process");
+
+    transport.incoming.push_back({"serial:device-1", hello()});
+    transport.incoming.push_back({"serial:device-1", command_capabilities()});
+    core.poll_once(); core.poll_once();
+    ProcessDefinition active{{"process-abort"}, {{ {"step-2"}, ProcessStepKind::Command, std::chrono::milliseconds{100}, tare_command("process-live"), {} }}};
+    expect(core.start_process(active, {"run-abort"}), "active process run did not start");
+    expect(core.abort_process({"run-abort"}), "active process did not abort");
+    const auto aborted = core.find_process_run({"run-abort"});
+    expect(aborted && aborted->state == ProcessRunState::Aborted, "abort did not produce terminal state");
+}
+
 } // namespace
 
 int run_core_tests() {
@@ -1205,6 +1326,10 @@ int run_core_tests() {
     test_command_transaction_invalid_lifecycle_transitions();
     test_command_transaction_lifecycle_and_rejections();
     test_command_timeout_and_authority_loss();
+    test_process_ordered_end_to_end_and_correlation();
+    test_process_command_failure_and_authority_loss();
+    test_process_timeouts_and_measurement_outcomes();
+    test_process_rejection_and_abort();
 
     return failures;
 }
