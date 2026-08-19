@@ -88,35 +88,55 @@ abort, and end-to-end tests:
 
 ## Milestone 7 — Supervisory Fault Handling and Recovery
 
+Complete and covered by Core-level lifecycle, process-impact, authority,
+timeout, recovery, duplicate-event, and end-to-end tests:
+
+- typed supervisory fault identities, classes, sources, and lifecycle states
+- explicit Core-owned supervisory fault lifecycle
+- deterministic active, acknowledged, cleared, and resettable behavior
+- generated supervisory faults for authority loss, command failure/timeout,
+  process failure, and unavailable operational data
+- blocking-fault process inhibition and active-run termination
+- explicit reset before manual process restart eligibility
+- no automatic restart or hidden recovery loop
+- in-memory fault history and correlated traces
+- deterministic duplicate and invalid lifecycle operations
+- single-terminal-transition process behavior under generated faults
+
+## Milestone 8 — Real Serial Transport
+
 Next implementation milestone:
 
-1. Define typed supervisory fault identities, classes, sources, and lifecycle
-   states.
-2. Add an explicit Core-owned fault state machine for active, acknowledged,
-   cleared, and resettable faults.
-3. Raise deterministic supervisory faults from relevant module authority loss,
-   command failure/timeout, process failure, and unavailable operational data.
-4. Keep module-local protective action independent; Core supervisory faults
-   must not replace hardware or module safety behavior.
-5. Inhibit starting affected process work while blocking faults are active.
-6. Abort or deterministically terminate affected active process work when a
-   configured blocking fault becomes active.
-7. Require explicit recovery/reset action before previously faulted process
-   work may restart; never auto-restart a process.
-8. Preserve fault history and correlated traces in memory for diagnostics
-   without adding persistence.
-9. Make duplicate fault reports, repeated acknowledgement, clear, and reset
-   operations deterministic and idempotent where appropriate.
-10. Add focused fault-lifecycle, process-inhibit, abort, recovery, authority,
-    timeout, duplicate-event, and end-to-end tests.
+1. Implement real serial-port open, configure, read, write, and close behavior
+   behind the existing transport boundary.
+2. Keep platform-specific serial API details inside the serial transport
+   implementation; Core, framing, parser, validator, registry, router, and
+   process/fault logic must remain transport-agnostic.
+3. Support explicit serial configuration including port, baud rate, data bits,
+   parity, stop bits, and bounded read/write timing behavior.
+4. Make transport reads non-blocking or bounded so Core polling cannot hang on
+   an idle or disconnected serial device.
+5. Preserve raw byte-stream behavior so Frame Assembler remains the owner of
+   framing, frame limits, and frame timeout policy.
+6. Handle open failure, configuration failure, disconnect, partial read,
+   partial write, write failure, and reconnect/close deterministically.
+7. Preserve connection identity semantics required by the existing Connection
+   Manager and authoritative module/session ownership model.
+8. Avoid hidden reconnect loops; reconnect attempts must be explicit and
+   observable to the caller.
+9. Add test seams or platform adapters so serial behavior can be regression
+   tested without requiring physical hardware for the normal automated suite.
+10. Add focused open/configure/read/write/partial-I/O/disconnect/failure tests,
+    plus Core-level framing and discovery integration coverage through the real
+    serial transport boundary.
 
-Milestone 7 is supervisory fault and recovery behavior only. It does not claim
-functional-safety certification and does not add hardware safety logic,
-automatic process restart, persistence, distributed execution, or GUI/HMI
+Milestone 8 adds the real serial transport boundary only. It does not add
+persistent configuration, GUI/HMI behavior, MQTT, TCP, ESP32 firmware,
+automatic device discovery, hidden reconnect policy, or functional-safety
 behavior.
 
 ## Later Work
 
-Real serial I/O, persistence, GUI/HMI work, MQTT, TCP, ESP32 integration,
-functional-safety implementation/certification, and broader automated recovery
-policy remain outside Milestones 1 through 7.
+Persistence, GUI/HMI work, MQTT, TCP, ESP32 integration, automatic device
+discovery, functional-safety implementation/certification, and broader
+automated recovery policy remain outside Milestones 1 through 8.

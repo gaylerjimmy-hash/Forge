@@ -1,4 +1,4 @@
-# Forge OS — Milestone 6 Process Orchestration
+# Forge OS — Milestone 7 Supervisory Fault Recovery
 
 Forge OS is a C++17 reference implementation for coordinating modular
 automation hardware over the Forge Protocol v0.1 line-oriented `KEY=VALUE`
@@ -39,6 +39,9 @@ output remains a machine-readable protocol channel.
 - Milestone 6: Core-owned non-blocking process orchestration, ordered command
   and measurement-condition steps, monotonic deadlines, deterministic failure
   outcomes, explicit abort, and correlated lifecycle tracing.
+- Milestone 7: Core-owned supervisory fault lifecycle, generated blocking
+  faults, process inhibition and termination, explicit recovery/reset, and
+  in-memory correlated diagnostic history.
 
 Successful heartbeats and measurements are intentionally not acknowledged on
 the wire. Rejections produce explicit, correlated `ERROR` messages.
@@ -56,10 +59,10 @@ limited to simulation, tooling, tests, utilities, and clients.
 
 ## Current Boundary
 
-Milestone 7 is supervisory fault handling and recovery built above the
-accepted module, command-transaction, measurement, and process layers. Real
-serial I/O, persistence, GUI/HMI work, MQTT, TCP, ESP32 integration, and
-functional-safety implementation remain future work.
+Milestone 8 is real serial transport built beneath the accepted framing
+and Core layers while preserving transport independence above that boundary.
+Persistence, GUI/HMI work, MQTT, TCP, ESP32 integration, automatic device
+discovery, and functional-safety implementation remain future work.
 
 The broader Forge v0.1 release definition includes module contracts,
 capabilities, measurements, command lifecycle, safety, recovery, simulation,
