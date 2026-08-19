@@ -21,6 +21,7 @@ struct SentPacket {
 class FakeTransport final : public ITransport {
 public:
     std::optional<TransportPacket> receive() override {
+        ++receive_calls;
         if (incoming.empty()) {
             return std::nullopt;
         }
@@ -41,6 +42,14 @@ public:
     std::deque<TransportPacket> incoming;
     std::vector<SentPacket> sent;
     bool send_succeeds{true};
+    int receive_calls{0};
+    std::optional<std::string> lifecycle_break;
+
+    std::optional<std::string> consume_lifecycle_break() override {
+        auto result = lifecycle_break;
+        lifecycle_break.reset();
+        return result;
+    }
 };
 
 int failures = 0;
@@ -229,16 +238,7 @@ void test_frame_error_produces_error_response() {
 
     core.poll_once();
 
-    expect(transport.sent.size() == 1, "frame error produced no response");
-
-    if (transport.sent.size() == 1) {
-        expect(
-            transport.sent.front().payload.find(
-                "CODE=FRAME_TERMINATOR\n"
-            ) != std::string::npos,
-            "missing terminator produced the wrong error"
-        );
-    }
+    expect(transport.sent.empty(), "incomplete raw fragment was rejected before completion");
 }
 
 void test_frame_timeout_produces_error_response() {
@@ -1404,6 +1404,74 @@ void test_process_rejection_and_abort() {
     expect(aborted && aborted->state == ProcessRunState::Aborted, "abort did not produce terminal state");
 }
 
+void test_fragmented_and_multiple_frames_are_processed_in_order() {
+    FakeTransport transport;
+    Core core{transport};
+    const std::string first = hello("fragmented");
+    transport.incoming.push_back({"serial:device-1", first.substr(0, 20)});
+    core.poll_once();
+    expect(transport.sent.empty(), "fragmented HELLO produced an early acknowledgement");
+    transport.incoming.push_back({"serial:device-1", first.substr(20)});
+    core.poll_once();
+    expect(transport.sent.size() == 1, "completed fragmented HELLO did not produce exactly one acknowledgement");
+
+    FakeTransport multiple;
+    Core multiple_core{multiple};
+    multiple.incoming.push_back({"serial:device-2", hello("first") + hello("second")});
+    multiple_core.poll_once();
+    expect(multiple.sent.size() == 2, "second complete frame in one packet was dropped");
+
+    FakeTransport trailing;
+    Core trailing_core{trailing};
+    trailing.incoming.push_back({"serial:device-3", hello("tail-first") + "HEART"});
+    trailing_core.poll_once();
+    expect(trailing.sent.size() == 1, "complete frame with a valid trailing partial was not processed");
+    const std::string tail_heartbeat = heartbeat("tail-heartbeat");
+    trailing.incoming.push_back({"serial:device-3", tail_heartbeat.substr(5)});
+    trailing_core.poll_once();
+    expect(trailing.sent.size() == 1,
+           "retained trailing partial was duplicated or produced an unexpected response");
+}
+
+void test_lifecycle_break_clears_only_pending_frame_and_reconnects_cleanly() {
+    FakeTransport transport;
+    Core core{transport};
+    transport.incoming.push_back({"serial:device-1", hello("initial")});
+    core.poll_once();
+    expect(transport.sent.size() == 1, "initial HELLO did not establish authority");
+
+    transport.incoming.push_back({"serial:device-1", "BROKEN-"});
+    core.poll_once();
+    transport.incoming.push_back({"serial:device-2", "UNKNOWN"});
+    core.poll_once();
+    expect(transport.sent.size() == 1, "incomplete frame produced a response");
+
+    transport.lifecycle_break = "serial:device-1";
+    const int receives_before_break = transport.receive_calls;
+    core.poll_once();
+    expect(transport.receive_calls == receives_before_break + 1,
+           "Core did not observe lifecycle break during normal polling");
+    expect(transport.sent.size() == 1, "lifecycle break implicitly reconnected or responded");
+    // The other connection's tail remains pending and completes independently.
+    transport.incoming.push_back({"serial:device-2", "\nEND\n"});
+    core.poll_once();
+    expect(transport.sent.size() == 2 &&
+           transport.sent.back().connection_id == "serial:device-2",
+           "lifecycle break cleared pending data for an unaffected connection");
+
+    // Reconnection is represented by fresh caller-provided traffic.  If stale
+    // framing bytes survived, this HELLO would be prefixed by BROKEN- and fail.
+    transport.incoming.push_back({"serial:device-1", hello("fresh")});
+    core.poll_once();
+    expect(transport.sent.size() == 3 &&
+           transport.sent.back().payload.find("HELLO_ACK\n") != std::string::npos,
+           "fresh post-break HELLO was contaminated by stale framing bytes");
+    if (transport.sent.size() == 3) {
+        expect(transport.sent.back().payload.find("CONNECTION=conn-1\n") != std::string::npos,
+               "reconnect changed stable physical connection identity");
+    }
+}
+
 } // namespace
 
 int run_core_tests() {
@@ -1415,6 +1483,8 @@ int run_core_tests() {
     test_trace_reports_discovery_lifecycle();
     test_transport_connection_is_reused();
     test_frame_error_produces_error_response();
+    test_fragmented_and_multiple_frames_are_processed_in_order();
+    test_lifecycle_break_clears_only_pending_frame_and_reconnects_cleanly();
     test_frame_timeout_produces_error_response();
     test_parse_error_produces_error_response();
     test_remaining_frame_failures();

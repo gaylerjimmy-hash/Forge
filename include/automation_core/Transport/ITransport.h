@@ -21,6 +21,12 @@ public:
         const std::string& connection_id,
         const std::string& payload
     ) = 0;
+
+    // One-shot physical lifecycle break notification.  The default keeps this
+    // narrow addition source-compatible with transports that have no lifecycle.
+    [[nodiscard]] virtual std::optional<std::string> consume_lifecycle_break() {
+        return std::nullopt;
+    }
 };
 
 } // namespace automation_core

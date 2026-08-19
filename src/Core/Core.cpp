@@ -380,6 +380,17 @@ void Core::trace(
 }
 
 bool Core::poll_once() {
+    // Consume the one-shot physical notification before receive() so stale
+    // bytes cannot be joined to a later packet with the same stable transport
+    // identity. ConnectionManager remains the owner of connection authority.
+    if (const auto lifecycle_break = transport_.consume_lifecycle_break()) {
+        const auto connection = transport_connections_.find(*lifecycle_break);
+        if (connection != transport_connections_.end()) {
+            frames_.clear(connection->second);
+            trace("transport_lifecycle_break", *lifecycle_break);
+        }
+    }
+    frames_.age();
     const TimePoint now = now_();
     const auto expired_modules =
         registry_.expire_heartbeats(heartbeat_timeout_, now);
@@ -479,14 +490,20 @@ bool Core::poll_once() {
     }
 
     const std::string& connection_id = connection->second;
-    const FrameResult frame_result =
-        frames_.assemble(
-            connection_id,
-            packet->payload,
-            packet->assembly_time
-        );
-
+    const auto frame_results = frames_.assemble_all(connection_id, packet->payload, packet->assembly_time);
+    if (frame_results.empty()) {
+        trace("frame_pending", connection_id);
+        return true;
+    }
+    for (const FrameResult& frame_result : frame_results) {
+    const auto process_frame = [&]() {
     if (!frame_result.ok()) {
+        // A raw serial fragment is not a protocol error.  FrameAssembler owns
+        // its retention and timeout; Core must not reject it before completion.
+        if (frame_result.error == FrameError::MissingTerminator && frames_.has_pending(connection_id)) {
+            trace("frame_pending", connection_id);
+            return;
+        }
         trace(
             "frame_rejected",
             frame_error_code(frame_result.error) +
@@ -503,7 +520,7 @@ bool Core::poll_once() {
             packet->connection_id,
             serializer_.serialize(error)
         ));
-        return true;
+        return;
     }
 
     trace("frame_accepted", connection_id);
@@ -527,7 +544,7 @@ bool Core::poll_once() {
             packet->connection_id,
             serializer_.serialize(error)
         ));
-        return true;
+        return;
     }
 
     trace("parse_accepted", connection_id);
@@ -556,8 +573,14 @@ bool Core::poll_once() {
         advance_processes(now);
         return true;
     };
-    if (const auto* ack=std::get_if<CommandAckMessage>(&parse_result.message->payload)) return handle_command_response(*ack,true);
-    if (const auto* result=std::get_if<CommandResultMessage>(&parse_result.message->payload)) return handle_command_response(*result,false);
+    if (const auto* ack=std::get_if<CommandAckMessage>(&parse_result.message->payload)) {
+        static_cast<void>(handle_command_response(*ack, true));
+        return;
+    }
+    if (const auto* result=std::get_if<CommandResultMessage>(&parse_result.message->payload)) {
+        static_cast<void>(handle_command_response(*result, false));
+        return;
+    }
 
     const RouteResult route_result =
         router_.route(
@@ -597,7 +620,7 @@ bool Core::poll_once() {
 
         trace("route_completed", route_result.detail + "; no response");
         advance_processes(now);
-        return true;
+        return;
     }
 
     trace("route_completed", route_result.detail);
@@ -674,6 +697,9 @@ bool Core::poll_once() {
         packet->connection_id
     );
 
+    };
+    process_frame();
+    }
     return true;
 }
 

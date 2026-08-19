@@ -67,6 +67,7 @@ if(AUTOMATION_CORE_BUILD_TESTS)
         tests/protocol/CapabilityModelTests.cpp
         tests/protocol/MeasurementModelTests.cpp
         tests/transport/ConsoleTransportTests.cpp
+        tests/transport/SerialTransportTests.cpp
         tests/validator/ValidatorTests.cpp
         tests/serializer/MessageSerializerTests.cpp
         tests/registry/ModuleRegistryTests.cpp
