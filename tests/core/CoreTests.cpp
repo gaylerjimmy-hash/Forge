@@ -1,6 +1,7 @@
 #include "automation_core/Core/Core.h"
 #include "automation_core/Transport/ITransport.h"
 
+#include <cstdio>
 #include <deque>
 #include <iostream>
 #include <optional>
@@ -1472,6 +1473,146 @@ void test_lifecycle_break_clears_only_pending_frame_and_reconnects_cleanly() {
     }
 }
 
+void test_reboot_discards_partial_frame_bytes() {
+    const std::string connection = "serial:reboot-frame-device";
+    const std::string stale_hello = hello("stale-reboot-hello");
+    const std::size_t split = stale_hello.size() / 2;
+
+    expect(split > 0 && split < stale_hello.size(),
+           "stale HELLO fixture could not be split into partial frame and continuation");
+
+    {
+        FakeTransport transport_a;
+        Core core_a{transport_a};
+
+        transport_a.incoming.push_back(
+            {connection, stale_hello.substr(0, split)});
+        core_a.poll_once();
+
+        expect(transport_a.sent.empty(),
+               "incomplete pre-reboot frame unexpectedly produced a response");
+    }
+
+    FakeTransport transport_b;
+    Core core_b{transport_b};
+
+    // This suffix would complete stale_hello exactly if Core A's assembler
+    // bytes had survived into Core B.
+    transport_b.incoming.push_back(
+        {connection, stale_hello.substr(split)});
+    core_b.poll_once();
+
+    bool stale_hello_ack = false;
+    for (const auto& sent : transport_b.sent) {
+        if (sent.payload.find("HELLO_ACK") != std::string::npos) {
+            stale_hello_ack = true;
+            break;
+        }
+    }
+    expect(!stale_hello_ack,
+           "post-reboot continuation completed a stale pre-reboot HELLO frame");
+
+    transport_b.incoming.push_back(
+        {connection, heartbeat("after-stale-continuation")});
+    core_b.poll_once();
+
+    expect(!transport_b.sent.empty() &&
+               transport_b.sent.back().payload.find("CODE=UNKNOWN_MODULE") !=
+                   std::string::npos,
+           "stale continuation restored or registered module authority");
+
+    transport_b.incoming.push_back(
+        {connection, hello("fresh-after-reboot")});
+    core_b.poll_once();
+
+    expect(!transport_b.sent.empty() &&
+               transport_b.sent.back().payload.find("HELLO_ACK") !=
+                   std::string::npos,
+           "fresh complete HELLO did not register normally after reboot");
+}
+
+void test_file_backed_reboot_recovery_evidence_is_non_authoritative() {
+    const std::string path = "core-recovery-reboot.bin";
+    DurableRecoveryState evidence;
+    evidence.revision = 9;
+    evidence.modules = {{"scale-01", "81A9C5D2"}};
+    evidence.interrupted_processes = {{"reboot-process", "reboot-run", "interrupted"}};
+    evidence.completed_processes = {{"completed-process", "completed-run", "succeeded"}};
+    evidence.pending_commands = {{"reboot-command", "scale-01", "81A9C5D2", "tare"}};
+    evidence.non_resettable_faults = {{"reboot-fault", 1, 2, 0}};
+    evidence.configuration_revision = "configuration-9";
+    evidence.calibrations = {{"scale-calibration", "revision-9"}};
+    evidence.persisted_operator_mode = OperatorMode::Automatic;
+    {
+        FakeTransport transport_a;
+        Core core_a{transport_a};
+        transport_a.incoming.push_back({"serial:old-device", hello("old-hello")});
+        transport_a.incoming.push_back({"serial:old-device", command_capabilities()});
+        core_a.poll_once(); core_a.poll_once();
+        expect(core_a.dispatch_command(tare_command("reboot-command")) == CommandRejection::None,
+               "Core A did not establish a live command transaction");
+        ProcessDefinition process{{"reboot-process"}, {{{"command"}, ProcessStepKind::Command,
+            std::chrono::milliseconds{100}, tare_command("reboot-process-command"), {}}}};
+        expect(core_a.start_process(process, {"reboot-run"}), "Core A did not establish a live process run");
+        expect(PersistenceStore(path).save(evidence) == PersistenceSaveStatus::Ok,
+               "Core A recovery evidence was not saved to a file");
+    } // Destroy Core A: only the file-backed evidence crosses the reboot boundary.
+
+    DurableRecoveryState loaded;
+    expect(PersistenceStore(path).load(loaded) == PersistenceLoadStatus::Ok,
+           "Core B could not load file-backed evidence");
+    FakeTransport transport_b;
+    Core core_b{transport_b};
+    expect(core_b.restore_durable_evidence(loaded), "Core B rejected valid recovery evidence");
+    expect(core_b.effective_operator_mode() == OperatorMode::Manual,
+           "persisted Automatic mode became live restart authority");
+    expect(core_b.recovery_state() == RecoveryState::RecoveryRequired && !core_b.confirm_recovery(),
+           "recovery confirmation was not gated before normal reconciliation");
+    expect(!core_b.find_command_transaction("reboot-command") && !core_b.find_process_run({"reboot-run"}) &&
+           core_b.dispatch_command(tare_command("reboot-command")) == CommandRejection::Routing,
+           "command, process, or transport authority survived reboot");
+    transport_b.incoming.push_back({"serial:new-device", heartbeat("after-reboot")});
+    core_b.poll_once();
+    expect(transport_b.sent.size() == 1 && transport_b.sent.back().payload.find("CODE=UNKNOWN_MODULE") != std::string::npos,
+           "historical registry authority was restored before HELLO");
+    transport_b.incoming.push_back({"serial:new-device", hello("reboot-hello")});
+    core_b.poll_once();
+    expect(transport_b.sent.size() == 2 && transport_b.sent.back().payload.find("HELLO_ACK") != std::string::npos &&
+           core_b.last_reconciliation() && *core_b.last_reconciliation() == ReconciliationOutcome::SameSession &&
+           core_b.confirm_recovery(),
+           "same-session reconciliation did not occur after normal HELLO_ACK processing");
+    std::remove(path.c_str()); std::remove((path + ".candidate").c_str());
+}
+
+void test_reboot_changed_session_and_invalid_restore_are_transactional() {
+    DurableRecoveryState accepted;
+    accepted.revision = 10; accepted.modules = {{"scale-01", "81A9C5D2"}};
+    accepted.interrupted_processes = {{"interrupted", "run", "interrupted"}};
+    accepted.completed_processes = {{"completed", "run", "succeeded"}};
+    accepted.pending_commands = {{"pending", "scale-01", "81A9C5D2", "tare"}};
+    accepted.non_resettable_faults = {{"fault", 1, 2, 0}};
+    accepted.configuration_revision = "configuration-10";
+    accepted.calibrations = {{"calibration", "10"}};
+    accepted.persisted_operator_mode = OperatorMode::Automatic;
+    FakeTransport transport;
+    Core core{transport};
+    expect(core.restore_durable_evidence(accepted), "accepted evidence was not restored");
+    DurableRecoveryState invalid = accepted; invalid.non_resettable_faults.front().state = 9;
+    expect(!core.restore_durable_evidence(invalid), "invalid evidence was accepted");
+    const auto& retained = core.durable_evidence();
+    expect(PersistenceStore::serialize(retained) == PersistenceStore::serialize(accepted),
+           "invalid restore changed an accepted durable category");
+    transport.incoming.push_back({"serial:changed-device", hello("changed-hello", "scale-01", "AAAAAAAA")});
+    core.poll_once();
+    expect(transport.sent.size() == 1 && transport.sent.back().payload.find("HELLO_ACK") != std::string::npos &&
+           core.last_reconciliation() && *core.last_reconciliation() == ReconciliationOutcome::ChangedSession,
+           "changed-session HELLO did not retain live Registry authority");
+    transport.incoming.push_back({"serial:changed-device", heartbeat("historical-session")});
+    core.poll_once();
+    expect(transport.sent.size() == 2 && transport.sent.back().payload.find("CODE=SESSION_MISMATCH") != std::string::npos,
+           "historical session evidence overrode the live Registry session");
+}
+
 } // namespace
 
 int run_core_tests() {
@@ -1521,6 +1662,9 @@ int run_core_tests() {
     test_generated_authority_loss_fault_is_correlated_and_idempotent();
     test_generated_command_timeout_fault_is_correlated_and_idempotent();
     test_generated_fault_recovery_requires_manual_restart();
+    test_reboot_discards_partial_frame_bytes();
+    test_file_backed_reboot_recovery_evidence_is_non_authoritative();
+    test_reboot_changed_session_and_invalid_restore_are_transactional();
 
     return failures;
 }

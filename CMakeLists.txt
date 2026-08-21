@@ -29,6 +29,7 @@ add_library(automation_core
     src/Transport/ConsoleTransport.cpp
     src/Transport/SerialTransport.cpp
     src/Core/Core.cpp
+    src/Persistence/PersistenceStore.cpp
     src/Protocol/MessageSerializer.cpp
 )
 
@@ -61,6 +62,7 @@ if(AUTOMATION_CORE_BUILD_TESTS)
         tests/test_main.cpp
         tests/connection/ConnectionManagerTests.cpp
         tests/core/CoreTests.cpp
+        tests/core/PersistenceStoreTests.cpp
         tests/frame/FrameAssemblerTests.cpp
         tests/parser/ParserTests.cpp
         tests/protocol/HeartbeatMessageTests.cpp

@@ -129,6 +129,25 @@ Core::Core(
       router_(validator_, registry_, responses_),
       transport_connections_() {}
 
+bool Core::restore_durable_evidence(const DurableRecoveryState& evidence) {
+    // Re-validate via the store format before changing the accepted snapshot.
+    DurableRecoveryState candidate;
+    if (PersistenceStore::deserialize(PersistenceStore::serialize(evidence), candidate) != PersistenceLoadStatus::Ok) return false;
+    durable_evidence_ = std::move(candidate);
+    effective_operator_mode_ = OperatorMode::Manual; // persisted Automatic is evidence, never restart authority.
+    normal_reconciliation_complete_ = false;
+    recovery_state_ = (!durable_evidence_.interrupted_processes.empty() ||
+        !durable_evidence_.pending_commands.empty() || !durable_evidence_.non_resettable_faults.empty())
+        ? RecoveryState::RecoveryRequired : RecoveryState::Normal;
+    last_reconciliation_.reset();
+    return true;
+}
+const DurableRecoveryState& Core::durable_evidence() const { return durable_evidence_; }
+OperatorMode Core::effective_operator_mode() const { return effective_operator_mode_; }
+RecoveryState Core::recovery_state() const { return recovery_state_; }
+bool Core::confirm_recovery() { if (recovery_state_ != RecoveryState::RecoveryRequired || !normal_reconciliation_complete_) return false; recovery_state_ = RecoveryState::Normal; return true; }
+std::optional<ReconciliationOutcome> Core::last_reconciliation() const { return last_reconciliation_; }
+
 CommandRejection Core::dispatch_command(CommandMessage command, const std::chrono::milliseconds timeout) {
     const auto module = registry_.find(command.module_id);
     if (!module || module->status != ModuleStatus::Active || module->session_id != command.session_id) return CommandRejection::Routing;
@@ -582,6 +601,10 @@ bool Core::poll_once() {
         return;
     }
 
+    // Retain only this parsed HELLO value long enough to compare it after the
+    // Router has accepted it and Registry has established live authority.
+    const auto* hello = std::get_if<HelloMessage>(&parse_result.message->payload);
+
     const RouteResult route_result =
         router_.route(
             connection_id,
@@ -679,11 +702,37 @@ bool Core::poll_once() {
     const auto* acknowledgement =
         std::get_if<HelloAckMessage>(&route_result.response->payload);
 
-    if (acknowledgement != nullptr) {
+    if (acknowledgement != nullptr && hello != nullptr) {
+        // A HELLO_ACK is emitted only after Parser, Router, and Registry have
+        // accepted this HELLO. Evidence therefore observes, but never supplies,
+        // the live module identity and session.
+        const auto live = registry_.find(hello->module_id);
+        if (live) {
+            const ModuleEvidence* prior = nullptr;
+            bool session_seen_under_other_identity = false;
+            for (const auto& record : durable_evidence_.modules) {
+                if (record.module_id == live->module_id) {
+                    prior = &record;
+                } else if (record.session_id == live->session_id) {
+                    session_seen_under_other_identity = true;
+                }
+            }
+            if (prior == nullptr) {
+                last_reconciliation_ = session_seen_under_other_identity
+                    ? ReconciliationOutcome::IdentityChanged
+                    : ReconciliationOutcome::NoPriorEvidence;
+            } else {
+                last_reconciliation_ = prior->session_id == live->session_id
+                    ? ReconciliationOutcome::SameSession
+                    : ReconciliationOutcome::ChangedSession;
+            }
+            normal_reconciliation_complete_ = true;
+            trace("reconciliation_completed", live->module_id);
+        }
         if (route_result.detail == "Offline module registered on a new connection") {
-            trace("module_recovered", acknowledgement->connection_id);
+            trace("module_recovered", hello->module_id);
         } else if (route_result.detail == "Existing session rebound to connection") {
-            trace("module_reconnected", acknowledgement->connection_id);
+            trace("module_reconnected", hello->module_id);
         }
     }
 

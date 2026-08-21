@@ -11,6 +11,7 @@ int run_connection_manager_tests();
 int run_console_transport_tests();
 int run_serial_transport_tests();
 int run_core_tests();
+int run_persistence_store_tests();
 int run_module_registry_tests();
 int run_message_serializer_tests();
 
@@ -28,6 +29,7 @@ int main()
         + run_console_transport_tests()
         + run_serial_transport_tests()
         + run_core_tests()
+        + run_persistence_store_tests()
         + run_module_registry_tests()
         + run_message_router_tests();
 
