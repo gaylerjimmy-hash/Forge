@@ -1,6 +1,7 @@
 #include "automation_core/Core/Core.h"
 #include "automation_core/Transport/ITransport.h"
 
+#include <cstdio>
 #include <deque>
 #include <iostream>
 #include <optional>
@@ -1472,6 +1473,66 @@ void test_lifecycle_break_clears_only_pending_frame_and_reconnects_cleanly() {
     }
 }
 
+void test_durable_reboot_reconciliation_and_frame_isolation() {
+    const std::string path = "core-reboot-evidence.bin";
+    std::remove(path.c_str());
+    { // Core A has real live authority, then records only durable evidence.
+        FakeTransport a;
+        Core core_a{a, path};
+        a.incoming.push_back({"serial:device-1", hello()});
+        a.incoming.push_back({"serial:device-1", command_capabilities()});
+        core_a.poll_once(); core_a.poll_once();
+        ProcessDefinition process{{"reboot-process"}, {{{"step"}, ProcessStepKind::Command,
+            std::chrono::milliseconds{100}, tare_command("reboot-tx"), {}}}};
+        expect(core_a.start_process(process, {"reboot-run"}), "Core A did not create interrupted process evidence");
+        expect(core_a.save_durable_evidence(77, "reboot-config", OperatorMode::Automatic), "Core A did not save evidence");
+        const std::string partial = hello("stale-fragment");
+        a.incoming.push_back({"serial:device-9", partial.substr(0, 20)}); core_a.poll_once();
+    }
+    FakeTransport b;
+    Core core_b{b, path};
+    expect(core_b.recovery_load_status()==LoadStatus::Ok && core_b.durable_evidence().revision==77,
+        "Core B did not load durable evidence");
+    expect(core_b.recovery_state()==RecoveryState::RecoveryRequired && core_b.effective_operator_mode()==OperatorMode::Manual,
+        "restart did not require recovery in effective Manual mode");
+    expect(!core_b.find_command_transaction("reboot-tx") && !core_b.find_process_run({"reboot-run"}),
+        "restart reconstructed command or process authority");
+    expect(!core_b.confirm_recovery(), "recovery confirmation bypassed normal reconciliation");
+    // The suffix cannot complete Core A's pending fragment in the fresh assembler.
+    const std::string stale = hello("stale-fragment");
+    b.incoming.push_back({"serial:device-9", stale.substr(20)}); core_b.poll_once();
+    expect(b.sent.empty() || b.sent.back().payload.find("HELLO_ACK\n")==std::string::npos,
+        "stale frame suffix survived Core lifecycle");
+    const auto responses_before_fresh = b.sent.size();
+    b.incoming.push_back({"serial:device-1", hello("reboot-same")}); core_b.poll_once();
+    expect(b.sent.size()==responses_before_fresh+1 && b.sent.back().payload.find("HELLO_ACK\n")!=std::string::npos,
+        "fresh HELLO did not establish fresh registry/transport authority");
+    expect(core_b.last_reconciliation_outcome()==ReconciliationOutcome::SameSession,
+        "same-session outcome was not reported after HELLO_ACK");
+    expect(core_b.confirm_recovery() && core_b.recovery_state()==RecoveryState::Normal,
+        "recovery confirmation was not gated by successful reconciliation");
+    std::remove(path.c_str());
+}
+
+void test_changed_session_reconciliation_does_not_override_registry() {
+    const std::string path="core-changed-session.bin"; std::remove(path.c_str());
+    DurableState evidence; evidence.modules={{"scale-01","81A9C5D2"}}; evidence.has_interrupted_process=true;
+    evidence.interrupted_process={"old-process","old-run"};
+    expect(PersistenceStore(path).save(evidence),
+           "could not persist changed-session recovery evidence");
+    FakeTransport transport; Core core{transport,path};
+    transport.incoming.push_back({"serial:device-2",hello("changed","scale-01","AAAAAAAA")}); core.poll_once();
+    expect(transport.sent.size()==1 && transport.sent[0].payload.find("HELLO_ACK\n")!=std::string::npos,
+        "changed-session HELLO did not traverse normal routing and ACK");
+    expect(core.last_reconciliation_outcome()==ReconciliationOutcome::ChangedSession,
+        "changed-session reconciliation outcome missing");
+    // A heartbeat for historical rather than Registry-owned session must fail.
+    transport.incoming.push_back({"serial:device-2",heartbeat("old-session","scale-01","81A9C5D2")}); core.poll_once();
+    expect(transport.sent.size()==2 && transport.sent.back().payload.find("CODE=SESSION_MISMATCH\n")!=std::string::npos,
+        "historical session overrode live Registry authority");
+    std::remove(path.c_str());
+}
+
 } // namespace
 
 int run_core_tests() {
@@ -1521,6 +1582,8 @@ int run_core_tests() {
     test_generated_authority_loss_fault_is_correlated_and_idempotent();
     test_generated_command_timeout_fault_is_correlated_and_idempotent();
     test_generated_fault_recovery_requires_manual_restart();
+    test_durable_reboot_reconciliation_and_frame_isolation();
+    test_changed_session_reconciliation_does_not_override_registry();
 
     return failures;
 }

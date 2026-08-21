@@ -10,6 +10,7 @@
 #include "automation_core/Response/ResponseBuilder.h"
 #include "automation_core/Router/MessageRouter.h"
 #include "automation_core/Transport/ITransport.h"
+#include "automation_core/Persistence/PersistenceStore.h"
 
 #include <chrono>
 #include <functional>
@@ -24,6 +25,8 @@ namespace automation_core {
 
 enum class CommandTransactionState { Dispatched, Acknowledged, Rejected, Succeeded, Failed, TimedOut, AuthorityLost };
 enum class CommandRejection { None, Protocol, Capability, Routing, Correlation, Lifecycle, Timeout, AuthorityLoss };
+enum class RecoveryState { Normal, RecoveryRequired };
+enum class ReconciliationOutcome { NoPriorEvidence, SameSession, ChangedSession, IdentityChanged };
 
 // Supervisory faults are Core coordination records, not module hardware safety
 // actions. Their identities are stable within the Core lifetime.
@@ -68,6 +71,8 @@ public:
     using NowFunction = std::function<TimePoint()>;
 
     explicit Core(ITransport& transport);
+    // Loads historical evidence only; it never reconstructs live authority.
+    Core(ITransport& transport, const std::string& durable_path);
     Core(ITransport& transport, std::ostream& trace_output);
     Core(ITransport& transport, NowFunction now);
     Core(
@@ -84,6 +89,14 @@ public:
     );
 
     bool poll_once();
+    [[nodiscard]] LoadStatus recovery_load_status() const noexcept;
+    [[nodiscard]] RecoveryState recovery_state() const noexcept;
+    [[nodiscard]] OperatorMode effective_operator_mode() const noexcept;
+    [[nodiscard]] const DurableState& durable_evidence() const noexcept;
+    [[nodiscard]] std::optional<ReconciliationOutcome> last_reconciliation_outcome() const noexcept;
+    [[nodiscard]] bool confirm_recovery();
+    // Explicit persistence capture: only evidence is converted from live state.
+    [[nodiscard]] bool save_durable_evidence(std::uint64_t revision, std::string configuration_revision = {}, OperatorMode configured_mode = OperatorMode::Manual);
 
     // Dispatch is accepted only for an active module with the accepted command
     // capability. The transaction remains inspectable after a terminal state.
@@ -152,6 +165,13 @@ private:
     std::vector<SupervisoryFault> supervisory_fault_history_;
     std::vector<SupervisoryFaultTrace> supervisory_fault_traces_;
     std::unordered_map<std::string, bool> faulted_processes_;
+    std::optional<PersistenceStore> persistence_;
+    DurableState durable_evidence_;
+    LoadStatus recovery_load_status_{LoadStatus::Missing};
+    RecoveryState recovery_state_{RecoveryState::Normal};
+    // A restart always begins Manual regardless of configured historical mode.
+    OperatorMode effective_operator_mode_{OperatorMode::Manual};
+    std::optional<ReconciliationOutcome> last_reconciliation_outcome_;
 };
 
 } // namespace automation_core

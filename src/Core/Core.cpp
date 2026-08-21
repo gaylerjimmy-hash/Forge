@@ -3,6 +3,7 @@
 #include "automation_core/Frame/FrameError.h"
 #include "automation_core/Protocol/ParseResult.h"
 
+#include <algorithm>
 #include <ostream>
 #include <string>
 #include <utility>
@@ -68,6 +69,17 @@ Core::Core(ITransport& transport)
         std::chrono::milliseconds{3000}
     ) {}
 
+Core::Core(ITransport& transport, const std::string& durable_path)
+    : Core(transport) {
+    persistence_.emplace(durable_path);
+    const LoadStatus status = persistence_->load(durable_evidence_);
+    recovery_load_status_ = status;
+    // Valid interrupted/pending evidence is deliberately ambiguous: no replay
+    // or resume is possible until a normal future reconciliation.
+    if (status == LoadStatus::Ok && (durable_evidence_.has_interrupted_process || !durable_evidence_.pending_commands.empty()))
+        recovery_state_ = RecoveryState::RecoveryRequired;
+}
+
 Core::Core(ITransport& transport, std::ostream& trace_output)
     : Core(
         transport,
@@ -129,7 +141,43 @@ Core::Core(
       router_(validator_, registry_, responses_),
       transport_connections_() {}
 
+LoadStatus Core::recovery_load_status() const noexcept { return recovery_load_status_; }
+RecoveryState Core::recovery_state() const noexcept { return recovery_state_; }
+OperatorMode Core::effective_operator_mode() const noexcept { return effective_operator_mode_; }
+const DurableState& Core::durable_evidence() const noexcept { return durable_evidence_; }
+std::optional<ReconciliationOutcome> Core::last_reconciliation_outcome() const noexcept { return last_reconciliation_outcome_; }
+bool Core::confirm_recovery() {
+    if (recovery_state_ != RecoveryState::RecoveryRequired || !last_reconciliation_outcome_) return false;
+    recovery_state_ = RecoveryState::Normal; return true;
+}
+
+bool Core::save_durable_evidence(const std::uint64_t revision, std::string configuration_revision, const OperatorMode configured_mode) {
+    if (!persistence_) return false;
+    DurableState evidence;
+    evidence.revision = revision;
+    evidence.configuration_revision = std::move(configuration_revision);
+    evidence.configured_operator_mode = configured_mode;
+    for (const auto& module : registry_.list()) evidence.modules.push_back({module.module_id, module.session_id});
+    for (const auto& entry : command_transactions_) {
+        const auto& transaction = entry.second;
+        if (transaction.state == CommandTransactionState::Dispatched || transaction.state == CommandTransactionState::Acknowledged)
+            evidence.pending_commands.push_back({entry.first, transaction.command.module_id, transaction.command.session_id});
+    }
+    for (const auto& entry : process_runs_) {
+        const auto& run = entry.second;
+        if ((run.state == ProcessRunState::Pending || run.state == ProcessRunState::Running) && !evidence.has_interrupted_process) {
+            evidence.has_interrupted_process = true; evidence.interrupted_process = {run.process_id.value, run.id.value};
+        } else if (run.state == ProcessRunState::Succeeded) { evidence.has_last_completed_process = true; evidence.last_completed_process = {run.process_id.value, run.id.value}; }
+    }
+    for (const auto& entry : supervisory_faults_) if (entry.second.state != SupervisoryFaultState::Resettable) {
+        const auto& f=entry.second; evidence.non_resettable_faults.push_back({f.id.value, static_cast<std::uint8_t>(f.classification), static_cast<std::uint8_t>(f.source), static_cast<std::uint8_t>(f.state)});
+    }
+    if (!persistence_->save(evidence)) return false;
+    durable_evidence_ = std::move(evidence); recovery_load_status_ = LoadStatus::Ok; return true;
+}
+
 CommandRejection Core::dispatch_command(CommandMessage command, const std::chrono::milliseconds timeout) {
+    if (recovery_state_ == RecoveryState::RecoveryRequired) return CommandRejection::Lifecycle;
     const auto module = registry_.find(command.module_id);
     if (!module || module->status != ModuleStatus::Active || module->session_id != command.session_id) return CommandRejection::Routing;
     if (!module->has_capabilities || !module->capabilities_available) return CommandRejection::Capability;
@@ -248,6 +296,7 @@ const std::vector<SupervisoryFault>& Core::supervisory_fault_history() const { r
 const std::vector<SupervisoryFaultTrace>& Core::supervisory_fault_traces() const { return supervisory_fault_traces_; }
 
 bool Core::start_process(ProcessDefinition definition, ProcessRunId run_id, const std::chrono::milliseconds run_timeout) {
+    if (recovery_state_ == RecoveryState::RecoveryRequired) return false;
     if (definition.id.value.empty() || run_id.value.empty() || definition.steps.empty() || run_timeout.count() <= 0 ||
         process_runs_.count(run_id.value) != 0) return false;
     for (const auto& step : definition.steps) if (step.id.value.empty() || step.timeout.count() <= 0) return false;
@@ -588,6 +637,19 @@ bool Core::poll_once() {
             *parse_result.message,
             now
         );
+
+    // Router has already parsed, validated and registered the HELLO.  Compare
+    // only after its normal HELLO_ACK path, so history never gains authority.
+    if (const auto* hello = std::get_if<HelloMessage>(&parse_result.message->payload)) {
+        if (route_result.response && std::get_if<HelloAckMessage>(&route_result.response->payload)) {
+            const auto prior = std::find_if(durable_evidence_.modules.begin(), durable_evidence_.modules.end(),
+                [&](const ModuleEvidence& e) { return e.module_id == hello->module_id; });
+            if (durable_evidence_.modules.empty()) last_reconciliation_outcome_ = ReconciliationOutcome::NoPriorEvidence;
+            else if (prior == durable_evidence_.modules.end()) last_reconciliation_outcome_ = ReconciliationOutcome::IdentityChanged;
+            else if (prior->session_id == hello->session_id) last_reconciliation_outcome_ = ReconciliationOutcome::SameSession;
+            else last_reconciliation_outcome_ = ReconciliationOutcome::ChangedSession;
+        }
+    }
 
     const auto* heartbeat =
         std::get_if<HeartbeatMessage>(&parse_result.message->payload);
